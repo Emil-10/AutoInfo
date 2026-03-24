@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="cs">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Info Exleasing | VIN / SPZ</title>
+    <meta
+      name="description"
+      content="Minimalisticke tmave vyhledavani vozidel podle VIN nebo SPZ."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="search-stage" id="search-stage">
+      <div class="brand">info.exleasing.cz</div>
+
+      <form id="lookup-form" class="lookup-shell" novalidate>
+        <div class="mode-switch" id="mode-switch" data-mode="plate" aria-label="Typ hledani">
+          <div class="mode-pill" id="mode-pill"></div>
+          <span class="mode-option" data-type="plate">SPZ</span>
+          <span class="mode-option" data-type="vin">VIN</span>
+        </div>
+
+        <label class="sr-only" for="vehicle-query">SPZ nebo VIN</label>
+        <div class="search-box">
+          <input
+            id="vehicle-query"
+            name="query"
+            type="text"
+            inputmode="text"
+            autocomplete="off"
+            placeholder="Zadej SPZ nebo 17mistny VIN"
+            maxlength="24"
+          />
+          <button type="submit" aria-label="Vyhledat">Hledat</button>
+        </div>
+
+        <p class="search-meta" id="search-status">
+          17 znaku automaticky prepne na VIN. Jinak zustava SPZ.
+        </p>
+      </form>
+    </main>
+
+    <section class="results" id="results" hidden>
+      <div class="result-topline">
+        <span class="result-source" id="result-source"></span>
+        <span class="result-query" id="result-query"></span>
+      </div>
+
+      <div class="result-summary" id="result-summary"></div>
+      <div class="highlights-grid" id="highlights-grid"></div>
+
+      <div class="result-sections" id="result-sections">
+        <div class="ownership-card" id="ownership-card"></div>
+        <div class="details-stack" id="details-stack"></div>
+      </div>
+
+      <div class="timeline-card" id="timeline-card"></div>
+    </section>
+
+    <template id="loading-template">
+      <div class="loading-summary"></div>
+      <div class="loading-grid">
+        <div class="loading-card"></div>
+        <div class="loading-card"></div>
+        <div class="loading-card"></div>
+      </div>
+    </template>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

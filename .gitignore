@@ -1,0 +1,8 @@
+node_modules/
+.env
+npm-debug.log*
+.cache/
+dist/
+server.out.log
+server.err.log
+result-preview.png
