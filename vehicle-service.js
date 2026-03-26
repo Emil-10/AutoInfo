@@ -203,47 +203,200 @@ const MOCK_VEHICLES = [
   }
 ];
 
+function getLookupRuntimeStatus() {
+  const transportEndpoint = normalizeWhitespace(process.env.TRANSPORT_CUBE_LOOKUP_URL || "");
+  const transportConfigured = Boolean(transportEndpoint);
+  const officialVinApiConfigured = Boolean(process.env.DATAOVOZIDLECH_API_KEY || process.env.RSV_PUBLIC_API_KEY);
+  const uniqaBrowserConfigured = Boolean(UNIQA_BROWSER_PATH);
+  const runtime = {
+    platform: process.platform,
+    nodeVersion: process.version,
+    mockDataEnabled: ENABLE_MOCK_DATA,
+    transportProvider: {
+      configured: transportConfigured,
+      method: (process.env.TRANSPORT_CUBE_METHOD || "GET").toUpperCase(),
+      host: extractUrlHost(transportEndpoint),
+      identifierParam: process.env.TRANSPORT_CUBE_IDENTIFIER_PARAM || "identifier",
+      identifierTypeParam: process.env.TRANSPORT_CUBE_IDENTIFIER_TYPE_PARAM || "identifierType",
+      hasApiKey: Boolean(process.env.TRANSPORT_CUBE_API_KEY)
+    },
+    officialVinApi: {
+      configured: officialVinApiConfigured
+    },
+    uniqaFallback: {
+      enabled: UNIQA_LOOKUP_ENABLED,
+      browserConfigured: uniqaBrowserConfigured,
+      browserDetected: uniqaBrowserConfigured,
+      likelySupported: process.platform === "win32"
+    },
+    warnings: []
+  };
+
+  if (!runtime.transportProvider.configured) {
+    runtime.warnings.push("Chybi TRANSPORT_CUBE_LOOKUP_URL; live lookup podle SPZ nebude fungovat.");
+  }
+
+  if (!runtime.officialVinApi.configured) {
+    runtime.warnings.push("Chybi DATAOVOZIDLECH_API_KEY nebo RSV_PUBLIC_API_KEY; live lookup VIN je omezeny.");
+  }
+
+  if (runtime.uniqaFallback.enabled && !runtime.uniqaFallback.browserConfigured) {
+    runtime.warnings.push("UNIQA fallback nema nakonfigurovany prohlizec.");
+  }
+
+  if (runtime.uniqaFallback.enabled && !runtime.uniqaFallback.likelySupported) {
+    runtime.warnings.push(
+      `UNIQA fallback je navrzeny pro interaktivni Windows prohlizec; aktualni server bezi na ${runtime.platform}.`
+    );
+  }
+
+  return runtime;
+}
+
+function createLookupDiagnostics(lookup) {
+  return {
+    queryType: lookup.type,
+    runtime: getLookupRuntimeStatus(),
+    attempts: []
+  };
+}
+
+function recordLookupAttempt(diagnostics, attempt) {
+  if (!diagnostics || !attempt) {
+    return;
+  }
+
+  diagnostics.attempts.push({
+    source: attempt.source || "unknown",
+    status: attempt.status || "unknown",
+    detail: attempt.detail || null,
+    host: attempt.host || null,
+    method: attempt.method || null
+  });
+}
+
+function formatLookupSource(source) {
+  const labels = {
+    "transport-cube": "Transport provider",
+    "official-vin-api": "Verejne VIN API",
+    "uniqa-browser": "UNIQA fallback",
+    "hlidac-statu": "Hlidac statu",
+    demo: "Demo dataset"
+  };
+
+  return labels[source] || "Lookup krok";
+}
+
+function uniqueText(values) {
+  return Array.from(new Set((Array.isArray(values) ? values : []).map((value) => normalizeWhitespace(value)).filter(Boolean)));
+}
+
+function extractUrlHost(value) {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    return new URL(value).host || null;
+  } catch (error) {
+    return "invalid-url";
+  }
+}
+
+function formatLookupError(error) {
+  if (!error) {
+    return "Neznama chyba.";
+  }
+
+  const details = [];
+  const message = normalizeWhitespace(error.message || "");
+
+  if (error.code && !message.includes(error.code)) {
+    details.push(error.code);
+  }
+
+  if (typeof error.statusCode === "number") {
+    details.push(`HTTP ${error.statusCode}`);
+  }
+
+  if (message) {
+    details.push(message);
+  }
+
+  return uniqueText(details).join(" - ") || "Neznama chyba.";
+}
+
 async function lookupVehicle(query, options = {}) {
   const lookup = parseLookupQuery(query);
-  const liveRecord = await lookupFromConfiguredProvider(lookup);
-  const publicVinRecord = liveRecord ? null : await lookupFromOfficialVinApi(lookup);
-  const uniqaRecord = liveRecord || publicVinRecord ? null : await lookupFromUniqaBrowser(lookup);
+  const diagnostics = createLookupDiagnostics(lookup);
+  const liveRecord = await lookupFromConfiguredProvider(lookup, diagnostics);
+  const publicVinRecord = liveRecord ? null : await lookupFromOfficialVinApi(lookup, diagnostics);
+  const uniqaRecord = liveRecord || publicVinRecord ? null : await lookupFromUniqaBrowser(lookup, diagnostics);
   let ownershipRecord = null;
-  const baseSeed = liveRecord || publicVinRecord || uniqaRecord || findMockVehicle(lookup);
+  const mockRecord = liveRecord || publicVinRecord || uniqaRecord ? null : findMockVehicle(lookup);
+  const baseSeed = liveRecord || publicVinRecord || uniqaRecord || mockRecord;
   const baseRecord = mergeSupplementalRecord(baseSeed, uniqaRecord);
   const ownershipLookup = resolveOwnershipLookup(lookup, baseRecord);
+
+  if (!liveRecord && !publicVinRecord && !uniqaRecord) {
+    recordLookupAttempt(diagnostics, {
+      source: "demo",
+      status: mockRecord ? "success" : ENABLE_MOCK_DATA ? "miss" : "skipped",
+      detail: mockRecord
+        ? "Byl nalezen zaznam v lokalnim demo datasetu."
+        : ENABLE_MOCK_DATA
+          ? "Dotaz nebyl nalezen v lokalnim demo datasetu."
+          : "Demo dataset je vypnuty."
+    });
+  }
 
   if (shouldUseHlidacOwnershipFallback(baseRecord, ownershipLookup)) {
     try {
       ownershipRecord = await lookupOwnershipFromHlidacStatu(ownershipLookup);
+      recordLookupAttempt(diagnostics, {
+        source: "hlidac-statu",
+        status: ownershipRecord ? "success" : "miss",
+        detail: ownershipRecord
+          ? "Doplnila se historie vlastniku a provozovatelu."
+          : "Verejny prehled vlastniku nevratil dalsi data."
+      });
     } catch (error) {
       ownershipRecord = null;
+      recordLookupAttempt(diagnostics, {
+        source: "hlidac-statu",
+        status: "error",
+        detail: formatLookupError(error)
+      });
     }
   }
 
   const record = mergeRecords(baseRecord, ownershipRecord) || ownershipRecord;
 
   if (!record) {
-    return null;
+    return { record: null, diagnostics };
   }
 
   const enriched = await enrichCompanies(record);
   const withInspectionState = await attachInspectionState(enriched, options);
   const sanitized = sanitizeClientRecord(withInspectionState);
   return {
-    ...sanitized,
-    query: {
-      raw: query,
-      normalized: lookup.compact,
-      type: lookup.type,
-      resolvedAt: new Date().toISOString()
+    diagnostics,
+    record: {
+      ...sanitized,
+      query: {
+        raw: query,
+        normalized: lookup.compact,
+        type: lookup.type,
+        resolvedAt: new Date().toISOString()
+      }
     }
   };
 }
 
-function describeLookupFailure(query) {
+function describeLookupFailure(query, diagnostics) {
   const lookup = parseLookupQuery(query);
-  const liveConfigured = Boolean(process.env.TRANSPORT_CUBE_LOOKUP_URL);
+  const runtime = diagnostics?.runtime || getLookupRuntimeStatus();
+  const liveConfigured = runtime.transportProvider.configured;
   const hints = [];
 
   if (lookup.type === "vin" && !liveConfigured) {
@@ -266,21 +419,43 @@ function describeLookupFailure(query) {
     hints.push("Pro zive napojeni doplnte TRANSPORT_CUBE_LOOKUP_URL a souvisejici promenne do .env.");
   }
 
+  if (diagnostics?.attempts?.length) {
+    diagnostics.attempts
+      .filter((attempt) => ["error", "missing_config"].includes(attempt.status))
+      .forEach((attempt) => {
+        hints.push(`${formatLookupSource(attempt.source)}: ${attempt.detail}`);
+      });
+  }
+
+  runtime.warnings.forEach((warning) => {
+    hints.push(warning);
+  });
+
   if (ENABLE_MOCK_DATA) {
     hints.push("Pro demo si muzete vyzkouset 1AB2345 nebo TMBJJ7NE8L0123456.");
   }
 
   return {
     message: "Pro zadany identifikator jsem nic nenasel.",
-    hints,
-    queryType: lookup.type
+    hints: uniqueText(hints),
+    queryType: lookup.type,
+    diagnostics: diagnostics || {
+      queryType: lookup.type,
+      runtime,
+      attempts: []
+    }
   };
 }
 
-async function lookupFromConfiguredProvider(lookup) {
+async function lookupFromConfiguredProvider(lookup, diagnostics) {
   const endpoint = process.env.TRANSPORT_CUBE_LOOKUP_URL;
 
   if (!endpoint) {
+    recordLookupAttempt(diagnostics, {
+      source: "transport-cube",
+      status: "missing_config",
+      detail: "Chybi TRANSPORT_CUBE_LOOKUP_URL."
+    });
     return null;
   }
 
@@ -301,83 +476,167 @@ async function lookupFromConfiguredProvider(lookup) {
   let url = endpoint;
   let body = null;
 
-  if (method === "GET") {
-    const requestUrl = new URL(endpoint);
-    requestUrl.searchParams.set(identifierParam, lookup.compact);
-    requestUrl.searchParams.set(
-      identifierTypeParam,
-      lookup.type === "vin"
-        ? process.env.TRANSPORT_CUBE_IDENTIFIER_TYPE_VIN || "vin"
-        : process.env.TRANSPORT_CUBE_IDENTIFIER_TYPE_PLATE || "spz"
-    );
-    url = requestUrl.toString();
-  } else {
-    headers["Content-Type"] = "application/json; charset=utf-8";
-    body = JSON.stringify({
-      [identifierParam]: lookup.compact,
-      [identifierTypeParam]:
+  try {
+    if (method === "GET") {
+      const requestUrl = new URL(endpoint);
+      requestUrl.searchParams.set(identifierParam, lookup.compact);
+      requestUrl.searchParams.set(
+        identifierTypeParam,
         lookup.type === "vin"
           ? process.env.TRANSPORT_CUBE_IDENTIFIER_TYPE_VIN || "vin"
           : process.env.TRANSPORT_CUBE_IDENTIFIER_TYPE_PLATE || "spz"
+      );
+      url = requestUrl.toString();
+    } else {
+      headers["Content-Type"] = "application/json; charset=utf-8";
+      body = JSON.stringify({
+        [identifierParam]: lookup.compact,
+        [identifierTypeParam]:
+          lookup.type === "vin"
+            ? process.env.TRANSPORT_CUBE_IDENTIFIER_TYPE_VIN || "vin"
+            : process.env.TRANSPORT_CUBE_IDENTIFIER_TYPE_PLATE || "spz"
+      });
+    }
+
+    const response = await requestJson(url, {
+      method,
+      headers,
+      timeoutMs,
+      body
     });
-  }
 
-  const response = await requestJson(url, {
-    method,
-    headers,
-    timeoutMs,
-    body
-  });
+    if (!response || (typeof response === "object" && Object.keys(response).length === 0)) {
+      recordLookupAttempt(diagnostics, {
+        source: "transport-cube",
+        status: "miss",
+        detail: "Provider nevratil zadna data.",
+        host: extractUrlHost(endpoint),
+        method
+      });
+      return null;
+    }
 
-  if (!response || (typeof response === "object" && Object.keys(response).length === 0)) {
+    const normalized = looksNormalized(response)
+      ? mergeWithSource(response, providerLabel, providerNote)
+      : normalizeGenericPayload(response, lookup, providerLabel, providerNote);
+
+    recordLookupAttempt(diagnostics, {
+      source: "transport-cube",
+      status: normalized ? "success" : "miss",
+      detail: normalized
+        ? "Provider vratil pouzitelna data."
+        : "Provider vratil data, ale nepodarilo se je znormalizovat.",
+      host: extractUrlHost(endpoint),
+      method
+    });
+
+    return normalized;
+  } catch (error) {
+    recordLookupAttempt(diagnostics, {
+      source: "transport-cube",
+      status: "error",
+      detail: formatLookupError(error),
+      host: extractUrlHost(endpoint),
+      method
+    });
     return null;
   }
-
-  if (looksNormalized(response)) {
-    return mergeWithSource(response, providerLabel, providerNote);
-  }
-
-  return normalizeGenericPayload(response, lookup, providerLabel, providerNote);
 }
 
-async function lookupFromOfficialVinApi(lookup) {
+async function lookupFromOfficialVinApi(lookup, diagnostics) {
   const apiKey = process.env.DATAOVOZIDLECH_API_KEY || process.env.RSV_PUBLIC_API_KEY;
 
-  if (lookup.type !== "vin" || !apiKey) {
+  if (lookup.type !== "vin") {
     return null;
   }
 
-  const response = await requestJson(
-    `https://api.dataovozidlech.cz/api/vehicletechnicaldata/v2?vin=${encodeURIComponent(lookup.compact)}`,
-    {
-      method: "GET",
-      headers: {
-        Accept: "application/json",
-        api_key: apiKey
-      },
-      timeoutMs: 15000
+  if (!apiKey) {
+    recordLookupAttempt(diagnostics, {
+      source: "official-vin-api",
+      status: "missing_config",
+      detail: "Chybi DATAOVOZIDLECH_API_KEY nebo RSV_PUBLIC_API_KEY."
+    });
+    return null;
+  }
+
+  try {
+    const response = await requestJson(
+      `https://api.dataovozidlech.cz/api/vehicletechnicaldata/v2?vin=${encodeURIComponent(lookup.compact)}`,
+      {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+          api_key: apiKey
+        },
+        timeoutMs: 15000
+      }
+    );
+
+    if (!response) {
+      recordLookupAttempt(diagnostics, {
+        source: "official-vin-api",
+        status: "miss",
+        detail: "Verejne VIN API nevratilo zadna data."
+      });
+      return null;
     }
-  );
 
-  if (!response) {
+    const normalized = normalizeGenericPayload(
+      response,
+      lookup,
+      "Datova kostka - verejna VIN API",
+      "Technicke udaje a pocty vlastniku/provozovatelu jsou nactene z oficialni verejne VIN API. Jmena subjektu tato verejna API podle dostupne dokumentace neposkytuji."
+    );
+
+    recordLookupAttempt(diagnostics, {
+      source: "official-vin-api",
+      status: normalized ? "success" : "miss",
+      detail: normalized
+        ? "Verejne VIN API vratilo pouzitelna data."
+        : "Verejne VIN API vratilo odpoved, ale nepodarilo se ji znormalizovat."
+    });
+
+    return normalized;
+  } catch (error) {
+    recordLookupAttempt(diagnostics, {
+      source: "official-vin-api",
+      status: "error",
+      detail: formatLookupError(error)
+    });
     return null;
   }
-
-  return normalizeGenericPayload(
-    response,
-    lookup,
-    "Datova kostka - verejna VIN API",
-    "Technicke udaje a pocty vlastniku/provozovatelu jsou nactene z oficialni verejne VIN API. Jmena subjektu tato verejna API podle dostupne dokumentace neposkytuji."
-  );
 }
 
-async function lookupFromUniqaBrowser(lookup) {
-  if (!UNIQA_LOOKUP_ENABLED || !UNIQA_BROWSER_PATH || !["vin", "plate"].includes(lookup.type)) {
+async function lookupFromUniqaBrowser(lookup, diagnostics) {
+  if (!["vin", "plate"].includes(lookup.type)) {
+    return null;
+  }
+
+  if (!UNIQA_LOOKUP_ENABLED) {
+    recordLookupAttempt(diagnostics, {
+      source: "uniqa-browser",
+      status: "skipped",
+      detail: "UNIQA fallback je vypnuty."
+    });
+    return null;
+  }
+
+  if (!UNIQA_BROWSER_PATH) {
+    recordLookupAttempt(diagnostics, {
+      source: "uniqa-browser",
+      status: "missing_config",
+      detail: "Chybi UNIQA_BROWSER_PATH nebo nebyl nalezen podporovany prohlizec."
+    });
     return null;
   }
 
   const cached = getCachedUniqaRecord(lookup.compact);
   if (cached) {
+    recordLookupAttempt(diagnostics, {
+      source: "uniqa-browser",
+      status: "success",
+      detail: "Pouzita byla cache UNIQA fallbacku."
+    });
     return clone(cached);
   }
 
@@ -386,6 +645,7 @@ async function lookupFromUniqaBrowser(lookup) {
     { initialDelayMs: 3500, typeDelayMs: 180, submitDelayMs: 3500, responseDelayMs: 9000 }
   ];
 
+  let lastError = null;
   for (const attempt of attempts) {
     try {
       const response = await executeUniqaBrowserLookup(lookup, attempt);
@@ -393,12 +653,24 @@ async function lookupFromUniqaBrowser(lookup) {
 
       if (record) {
         setCachedUniqaRecord(lookup.compact, record);
+        recordLookupAttempt(diagnostics, {
+          source: "uniqa-browser",
+          status: "success",
+          detail: "UNIQA fallback vratil pouzitelna data."
+        });
         return clone(record);
       }
     } catch (error) {
+      lastError = error;
       continue;
     }
   }
+
+  recordLookupAttempt(diagnostics, {
+    source: "uniqa-browser",
+    status: lastError ? "error" : "miss",
+    detail: lastError ? formatLookupError(lastError) : "UNIQA fallback nevratil zadna data."
+  });
 
   return null;
 }
@@ -2781,7 +3053,16 @@ function requestText(targetUrl, options) {
 
 function requestStructured(targetUrl, options, responseType) {
   return new Promise((resolve, reject) => {
-    const requestUrl = new URL(targetUrl);
+    let requestUrl;
+    try {
+      requestUrl = new URL(targetUrl);
+    } catch (error) {
+      const invalidUrlError = new Error(`Neplatna cilova URL: ${targetUrl}`);
+      invalidUrlError.code = "INVALID_URL";
+      reject(invalidUrlError);
+      return;
+    }
+
     const transport = requestUrl.protocol === "http:" ? http : https;
     const requestOptions = {
       hostname: requestUrl.hostname,
@@ -2798,11 +3079,14 @@ function requestStructured(targetUrl, options, responseType) {
         const payload = Buffer.concat(chunks).toString("utf8");
 
         if (response.statusCode < 200 || response.statusCode >= 300) {
-          reject(
-            new Error(
-              `Rozhrani vratilo ${response.statusCode}: ${payload.slice(0, 300) || "bez detailu"}`
-            )
+          const requestError = new Error(
+            `Rozhrani vratilo ${response.statusCode}: ${payload.slice(0, 300) || "bez detailu"}`
           );
+          requestError.code = "HTTP_ERROR";
+          requestError.statusCode = response.statusCode;
+          requestError.responseSnippet = payload.slice(0, 300) || "bez detailu";
+          requestError.targetHost = requestUrl.host;
+          reject(requestError);
           return;
         }
 
@@ -2819,16 +3103,24 @@ function requestStructured(targetUrl, options, responseType) {
         try {
           resolve(JSON.parse(payload));
         } catch (error) {
-          reject(new Error("Rozhrani nevratilo validni JSON."));
+          const parseError = new Error("Rozhrani nevratilo validni JSON.");
+          parseError.code = "INVALID_JSON";
+          parseError.targetHost = requestUrl.host;
+          reject(parseError);
         }
       });
     });
 
     request.setTimeout(options.timeoutMs || 15000, () => {
-      request.destroy(new Error("Vyprsel casovy limit rozhrani."));
+      const timeoutError = new Error("Vyprsel casovy limit rozhrani.");
+      timeoutError.code = "ETIMEDOUT";
+      request.destroy(timeoutError);
     });
 
-    request.on("error", (error) => reject(error));
+    request.on("error", (error) => {
+      error.targetHost = error.targetHost || requestUrl.host;
+      reject(error);
+    });
 
     if (options.body) {
       request.write(options.body);
@@ -3098,6 +3390,7 @@ function findSuccessfulUniqaResponse(responses) {
 }
 
 module.exports = {
+  getLookupRuntimeStatus,
   lookupVehicle,
   lookupVehicleInspections,
   describeLookupFailure

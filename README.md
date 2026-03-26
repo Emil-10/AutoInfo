@@ -52,6 +52,13 @@ Backend umi dve varianty:
 
 Pokud vas provider vraci uz normalizovanou strukturu s `hero`, `sections` a `ownership`, UI ji vezme rovnou. Jinak se pouzije genericky normalizer s mapovanim beznych nazvu poli.
 
+## Railway diagnostika
+
+- `.env` se nedeployuje z GitHubu, takze vsechny potrebne promenne nastavte v `Railway > Variables`.
+- `GET /api/health` ted vraci i bezpecny souhrn lookup konfigurace bez secretu.
+- Pri neuspesnem `/api/lookup` se do odpovedi i logu vypise, jestli chybi `TRANSPORT_CUBE_LOOKUP_URL`, `DATAOVOZIDLECH_API_KEY`, nebo selhalo volani provideru.
+- Startup log ted obsahuje radek `[startup] lookup runtime ...`, ktery hned po deployi ukaze, co je na serveru skutecne nakonfigurovano.
+
 ## Poznamka k datum
 
 Verejne dostupna cast Datove kostky zjevne neresi cely pozadovany rozsah `SPZ + plne nazvy majitelu`, takze je aplikace pripravena na doplneni interniho nebo neverejneho zdroje bez zmeny frontendu.

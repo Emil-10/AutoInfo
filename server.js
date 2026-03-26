@@ -5,7 +5,12 @@ const { URL } = require("url");
 
 loadEnvFile(path.join(__dirname, ".env"));
 
-const { lookupVehicle, lookupVehicleInspections, describeLookupFailure } = require("./vehicle-service");
+const {
+  lookupVehicle,
+  lookupVehicleInspections,
+  describeLookupFailure,
+  getLookupRuntimeStatus
+} = require("./vehicle-service");
 
 const PORT = Number(process.env.PORT || 3000);
 const DIST_DIR = path.join(__dirname, "dist");
@@ -39,7 +44,11 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (requestUrl.pathname === "/api/health") {
-      sendJson(res, 200, { ok: true, uptime: process.uptime() });
+      sendJson(res, 200, {
+        ok: true,
+        uptime: process.uptime(),
+        lookup: getLookupRuntimeStatus()
+      });
       return;
     }
 
@@ -54,6 +63,7 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`Info.exleasing.cz bezi na http://localhost:${PORT}`);
+  console.log(`[startup] lookup runtime ${JSON.stringify(getLookupRuntimeStatus())}`);
 });
 
 async function handleLookup(requestUrl, res) {
@@ -68,14 +78,21 @@ async function handleLookup(requestUrl, res) {
   }
 
   try {
-    const result = await lookupVehicle(query);
+    const { record, diagnostics } = await lookupVehicle(query);
 
-    if (!result) {
-      sendJson(res, 404, describeLookupFailure(query));
+    if (!record) {
+      const payload = describeLookupFailure(query, diagnostics);
+      const statusCode = diagnostics?.attempts?.some((attempt) => attempt.status === "error") ? 502 : 404;
+      logLookupOutcome(query, diagnostics, statusCode);
+      sendJson(res, statusCode, payload);
       return;
     }
 
-    sendJson(res, 200, result);
+    if (diagnostics?.attempts?.some((attempt) => attempt.status === "error")) {
+      logLookupOutcome(query, diagnostics, 200);
+    }
+
+    sendJson(res, 200, record);
   } catch (error) {
     sendJson(res, 502, {
       message: "Nepodarilo se nacist data ze zdroje.",
@@ -184,4 +201,45 @@ function loadEnvFile(filePath) {
       process.env[key] = value;
     }
   });
+}
+
+function logLookupOutcome(query, diagnostics, statusCode) {
+  const payload = {
+    statusCode,
+    query: maskLookupQuery(query),
+    queryType: diagnostics?.queryType || "unknown",
+    attempts: Array.isArray(diagnostics?.attempts)
+      ? diagnostics.attempts.map((attempt) => ({
+          source: attempt.source,
+          status: attempt.status,
+          detail: attempt.detail,
+          host: attempt.host || null,
+          method: attempt.method || null
+        }))
+      : [],
+    warnings: Array.isArray(diagnostics?.runtime?.warnings) ? diagnostics.runtime.warnings : []
+  };
+
+  const message = `[lookup] ${JSON.stringify(payload)}`;
+
+  if (statusCode >= 500) {
+    console.error(message);
+    return;
+  }
+
+  console.warn(message);
+}
+
+function maskLookupQuery(query) {
+  const value = String(query || "").trim();
+
+  if (!value) {
+    return "";
+  }
+
+  if (value.length <= 6) {
+    return value.slice(0, 2) + "*".repeat(Math.max(0, value.length - 2));
+  }
+
+  return `${value.slice(0, 3)}***${value.slice(-3)}`;
 }
