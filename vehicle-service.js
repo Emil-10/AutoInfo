@@ -236,11 +236,11 @@ function getLookupRuntimeStatus() {
   };
 
   if (!runtime.transportProvider.configured) {
-    runtime.warnings.push("Chybi TRANSPORT_CUBE_LOOKUP_URL; live lookup podle SPZ nebude fungovat.");
+    runtime.warnings.push("Chybi TRANSPORT_CUBE_LOOKUP_URL; primarni provider neni nakonfigurovany.");
   }
 
   if (!runtime.officialVinApi.configured) {
-    runtime.warnings.push("Chybi DATAOVOZIDLECH_API_KEY nebo RSV_PUBLIC_API_KEY; live lookup VIN je omezeny.");
+    runtime.warnings.push("Chybi DATAOVOZIDLECH_API_KEY nebo RSV_PUBLIC_API_KEY; oficialni VIN API neni nakonfigurovane.");
   }
 
   if (runtime.uniqaFallback.enabled && !runtime.uniqaFallback.browserConfigured) {
@@ -407,15 +407,11 @@ function describeLookupFailure(query, diagnostics) {
   const hints = [];
 
   if (lookup.type === "vin" && !liveConfigured) {
-    hints.push("Tento VIN neni v lokalnim demo datasetu. Pro realna data je potreba aktivni online napojeni.");
+    hints.push("Tento VIN neni v lokalnim demo datasetu. Realna data ted zavisi na UNIQA fallbacku nebo externim provideru.");
   }
 
   if (lookup.type === "vin" && !process.env.DATAOVOZIDLECH_API_KEY && !process.env.RSV_PUBLIC_API_KEY) {
-    hints.push("Pro oficialni verejne VIN API chybi DATAOVOZIDLECH_API_KEY.");
-  }
-
-  if (lookup.type === "plate" && !liveConfigured) {
-    hints.push("Vyhledani podle SPZ vyzaduje aktivni online napojeni.");
+    hints.push("Oficialni verejne VIN API neni nakonfigurovane.");
   }
 
   if (lookup.type === "unknown") {
@@ -423,7 +419,7 @@ function describeLookupFailure(query, diagnostics) {
   }
 
   if (!liveConfigured) {
-    hints.push("Pro zive napojeni doplnte TRANSPORT_CUBE_LOOKUP_URL a souvisejici promenne do .env.");
+    hints.push("Primarni provider neni nakonfigurovany. Pokud fallback nestaci, doplnte TRANSPORT_CUBE_LOOKUP_URL.");
   }
 
   if (diagnostics?.attempts?.length) {
