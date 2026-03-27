@@ -5,18 +5,13 @@ const { URL } = require("url");
 
 loadEnvFile(path.join(__dirname, ".env"));
 
-const {
-  lookupVehicle,
-  lookupVehicleInspections,
-  describeLookupFailure,
-  getLookupRuntimeStatus
-} = require("./vehicle-service");
-
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || "0.0.0.0";
 const DIST_DIR = path.join(__dirname, "dist");
 const PUBLIC_DIR = path.join(__dirname, "public");
 const STATIC_DIR = fs.existsSync(path.join(DIST_DIR, "index.html")) ? DIST_DIR : PUBLIC_DIR;
+let vehicleService = null;
+let vehicleServiceLoadError = null;
 
 const MIME_TYPES = {
   ".css": "text/css; charset=utf-8",
@@ -45,10 +40,11 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (requestUrl.pathname === "/api/health") {
+      const runtimeStatus = safeGetLookupRuntimeStatus();
       sendJson(res, 200, {
         ok: true,
         uptime: process.uptime(),
-        lookup: getLookupRuntimeStatus()
+        lookup: runtimeStatus
       });
       return;
     }
@@ -71,7 +67,7 @@ server.listen(PORT, HOST, () => {
 
   console.log(`Info.exleasing.cz bezi na http://${host}:${PORT}`);
   console.log(`[startup] bound host=${HOST} port=${PORT}`);
-  console.log(`[startup] lookup runtime ${JSON.stringify(getLookupRuntimeStatus())}`);
+  console.log(`[startup] lookup runtime ${JSON.stringify(safeGetLookupRuntimeStatus())}`);
 });
 
 async function handleLookup(requestUrl, res) {
@@ -86,6 +82,7 @@ async function handleLookup(requestUrl, res) {
   }
 
   try {
+    const { lookupVehicle, describeLookupFailure } = getVehicleService();
     const { record, diagnostics } = await lookupVehicle(query);
 
     if (!record) {
@@ -122,6 +119,7 @@ async function handleInspectionLookup(requestUrl, res) {
   }
 
   try {
+    const { lookupVehicleInspections } = getVehicleService();
     const result = await lookupVehicleInspections({ query, vin, pcv });
     sendJson(res, result.status === "ready" ? 200 : result.status === "pending" ? 202 : 404, result);
   } catch (error) {
@@ -209,6 +207,39 @@ function loadEnvFile(filePath) {
       process.env[key] = value;
     }
   });
+}
+
+function getVehicleService() {
+  if (vehicleService) {
+    return vehicleService;
+  }
+
+  try {
+    vehicleService = require("./vehicle-service");
+    vehicleServiceLoadError = null;
+    return vehicleService;
+  } catch (error) {
+    vehicleServiceLoadError = error;
+    throw error;
+  }
+}
+
+function safeGetLookupRuntimeStatus() {
+  try {
+    const { getLookupRuntimeStatus } = getVehicleService();
+    const runtimeStatus = getLookupRuntimeStatus();
+    if (vehicleServiceLoadError) {
+      runtimeStatus.loaderError = vehicleServiceLoadError.message;
+    }
+    return runtimeStatus;
+  } catch (error) {
+    return {
+      platform: process.platform,
+      nodeVersion: process.version,
+      loaderError: error.message,
+      warnings: ["Lookup modul se nepodarilo inicializovat pri startu serveru."]
+    };
+  }
 }
 
 function logLookupOutcome(query, diagnostics, statusCode) {
