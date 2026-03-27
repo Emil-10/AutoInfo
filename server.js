@@ -13,6 +13,7 @@ const {
 } = require("./vehicle-service");
 
 const PORT = Number(process.env.PORT || 3000);
+const HOST = process.env.HOST || "0.0.0.0";
 const DIST_DIR = path.join(__dirname, "dist");
 const PUBLIC_DIR = path.join(__dirname, "public");
 const STATIC_DIR = fs.existsSync(path.join(DIST_DIR, "index.html")) ? DIST_DIR : PUBLIC_DIR;
@@ -61,8 +62,15 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`Info.exleasing.cz bezi na http://localhost:${PORT}`);
+server.listen(PORT, HOST, () => {
+  const address = server.address();
+  const host =
+    address && typeof address === "object" && address.address
+      ? address.address
+      : HOST;
+
+  console.log(`Info.exleasing.cz bezi na http://${host}:${PORT}`);
+  console.log(`[startup] bound host=${HOST} port=${PORT}`);
   console.log(`[startup] lookup runtime ${JSON.stringify(getLookupRuntimeStatus())}`);
 });
 
