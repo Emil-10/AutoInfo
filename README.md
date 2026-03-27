@@ -55,9 +55,11 @@ Pokud vas provider vraci uz normalizovanou strukturu s `hero`, `sections` a `own
 ## Railway diagnostika
 
 - `.env` se nedeployuje z GitHubu, takze vsechny potrebne promenne nastavte v `Railway > Variables`.
+- Railway by mel buildit pres prilozeny `Dockerfile`, ktery pouziva Playwright image a spousti server pres `xvfb-run`.
 - `GET /api/health` ted vraci i bezpecny souhrn lookup konfigurace bez secretu.
 - Pri neuspesnem `/api/lookup` se do odpovedi i logu vypise, jestli chybi `TRANSPORT_CUBE_LOOKUP_URL`, `DATAOVOZIDLECH_API_KEY`, nebo selhalo volani provideru.
 - Startup log ted obsahuje radek `[startup] lookup runtime ...`, ktery hned po deployi ukaze, co je na serveru skutecne nakonfigurovano.
+- Pro Railway neni potreba nastavovat `UNIQA_BROWSER_PATH`, pokud bezite pres Docker image s Playwright Chromium.
 
 ## Poznamka k datum
 

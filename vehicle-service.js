@@ -10,7 +10,9 @@ const ENABLE_MOCK_DATA = String(process.env.ENABLE_MOCK_DATA || "true").toLowerC
 const ARES_ENABLED = String(process.env.ARES_ENABLED || "true").toLowerCase() !== "false";
 const UNIQA_LOOKUP_ENABLED = String(process.env.UNIQA_LOOKUP_ENABLED || "true").toLowerCase() !== "false";
 const UNIQA_PHONE = normalizeWhitespace(process.env.UNIQA_PHONE || "+420 700 700 700") || "+420 700 700 700";
-const UNIQA_BROWSER_PATH = process.env.UNIQA_BROWSER_PATH || detectDefaultBrowserPath();
+const UNIQA_HEADLESS = String(process.env.UNIQA_HEADLESS || "false").toLowerCase() === "true";
+const UNIQA_BROWSER_INFO = resolveUniqaBrowserInfo();
+const UNIQA_BROWSER_PATH = UNIQA_BROWSER_INFO.path;
 const UNIQA_CACHE_TTL_MS = Math.max(0, Number(process.env.UNIQA_CACHE_TTL_MS || 900000) || 900000);
 const UNIQA_LOOKUP_CACHE = new Map();
 const OPEN_DATA_CACHE_TTL_MS = Math.max(60000, Number(process.env.OPEN_DATA_CACHE_TTL_MS || 21600000) || 21600000);
@@ -226,8 +228,9 @@ function getLookupRuntimeStatus() {
     uniqaFallback: {
       enabled: UNIQA_LOOKUP_ENABLED,
       browserConfigured: uniqaBrowserConfigured,
-      browserDetected: uniqaBrowserConfigured,
-      likelySupported: process.platform === "win32"
+      browserSource: UNIQA_BROWSER_INFO.source,
+      headless: UNIQA_HEADLESS,
+      displayAvailable: Boolean(process.env.DISPLAY)
     },
     warnings: []
   };
@@ -241,12 +244,16 @@ function getLookupRuntimeStatus() {
   }
 
   if (runtime.uniqaFallback.enabled && !runtime.uniqaFallback.browserConfigured) {
-    runtime.warnings.push("UNIQA fallback nema nakonfigurovany prohlizec.");
+    runtime.warnings.push("UNIQA fallback nema dostupny browser binary.");
   }
 
-  if (runtime.uniqaFallback.enabled && !runtime.uniqaFallback.likelySupported) {
+  if (runtime.uniqaFallback.browserSource === "env-missing") {
+    runtime.warnings.push("UNIQA_BROWSER_PATH je nastaveny, ale soubor na disku neexistuje.");
+  }
+
+  if (runtime.uniqaFallback.enabled && !runtime.uniqaFallback.headless && runtime.platform === "linux" && !runtime.uniqaFallback.displayAvailable) {
     runtime.warnings.push(
-      `UNIQA fallback je navrzeny pro interaktivni Windows prohlizec; aktualni server bezi na ${runtime.platform}.`
+      "UNIQA fallback v headed rezimu na Linuxu potrebuje DISPLAY. Na Railway aplikaci spoustejte pres Xvfb."
     );
   }
 
@@ -625,7 +632,16 @@ async function lookupFromUniqaBrowser(lookup, diagnostics) {
     recordLookupAttempt(diagnostics, {
       source: "uniqa-browser",
       status: "missing_config",
-      detail: "Chybi UNIQA_BROWSER_PATH nebo nebyl nalezen podporovany prohlizec."
+      detail: "Nebyl nalezen browser pro UNIQA fallback. Na Railway je potreba image s Playwright Chromium."
+    });
+    return null;
+  }
+
+  if (process.platform === "linux" && !UNIQA_HEADLESS && !process.env.DISPLAY) {
+    recordLookupAttempt(diagnostics, {
+      source: "uniqa-browser",
+      status: "missing_config",
+      detail: "Na Linuxu chybi DISPLAY pro headed UNIQA fallback. Spousteni musi bezet pres Xvfb."
     });
     return null;
   }
@@ -677,11 +693,7 @@ async function lookupFromUniqaBrowser(lookup, diagnostics) {
 
 async function executeUniqaBrowserLookup(lookup, attempt) {
   const { chromium } = require("playwright-core");
-  const browser = await chromium.launch({
-    executablePath: UNIQA_BROWSER_PATH,
-    headless: false,
-    args: ["--start-minimized", "--window-position=-32000,-32000", "--window-size=1366,900"]
-  });
+  const browser = await chromium.launch(buildUniqaLaunchOptions());
 
   try {
     const page = await browser.newPage({
@@ -3343,7 +3355,29 @@ function joinUniqueText(values, separator) {
   return Array.from(new Set(values.map((value) => normalizeWhitespace(value)).filter(Boolean))).join(separator);
 }
 
-function detectDefaultBrowserPath() {
+function resolveUniqaBrowserInfo() {
+  const explicitPath = normalizeWhitespace(process.env.UNIQA_BROWSER_PATH || "");
+  if (explicitPath) {
+    return {
+      path: fs.existsSync(explicitPath) ? explicitPath : null,
+      source: fs.existsSync(explicitPath) ? "env" : "env-missing"
+    };
+  }
+
+  const systemBrowserPath = detectSystemBrowserPath();
+  if (systemBrowserPath) {
+    return { path: systemBrowserPath, source: "system" };
+  }
+
+  const playwrightBrowserPath = detectPlaywrightBrowserPath();
+  if (playwrightBrowserPath) {
+    return { path: playwrightBrowserPath, source: "playwright" };
+  }
+
+  return { path: null, source: null };
+}
+
+function detectSystemBrowserPath() {
   const candidates = [
     "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
     "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
@@ -3351,6 +3385,34 @@ function detectDefaultBrowserPath() {
   ];
 
   return candidates.find((candidate) => fs.existsSync(candidate)) || null;
+}
+
+function detectPlaywrightBrowserPath() {
+  try {
+    const { chromium } = require("playwright-core");
+    const executablePath = typeof chromium.executablePath === "function" ? chromium.executablePath() : null;
+    return executablePath && fs.existsSync(executablePath) ? executablePath : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function buildUniqaLaunchOptions() {
+  const args = ["--window-size=1366,900"];
+
+  if (process.platform === "win32") {
+    args.push("--start-minimized", "--window-position=-32000,-32000");
+  }
+
+  if (process.platform === "linux") {
+    args.push("--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage");
+  }
+
+  return {
+    executablePath: UNIQA_BROWSER_PATH || undefined,
+    headless: UNIQA_HEADLESS,
+    args
+  };
 }
 
 function getCachedUniqaRecord(key) {
