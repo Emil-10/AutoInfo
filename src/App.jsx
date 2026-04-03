@@ -21,7 +21,7 @@ import { Input } from "./components/ui/input";
 import { Skeleton } from "./components/ui/skeleton";
 import { cn } from "./lib/utils";
 
-const DEMO_EXAMPLES = ["1AB2345", "TMBJJ7NE8L0123456", "5AC5678"];
+const DEMO_EXAMPLES = ["1AB2345", "TMBJJ7NE8L0123456", "5AC5678", "27074358"];
 
 export default function App() {
   const [query, setQuery] = useState("");
@@ -31,7 +31,7 @@ export default function App() {
   const [hasSearched, setHasSearched] = useState(false);
   const [selectedType, setSelectedType] = useState("plate");
   const [statusText, setStatusText] = useState(
-    "Zadej SPZ nebo 17mistny VIN. Rozhrani typ pozna automaticky."
+    "Zadej SPZ, ICO nebo 17mistny VIN. Rozhrani typ pozna automaticky."
   );
 
   const detectedType = useMemo(() => detectType(query), [query]);
@@ -109,7 +109,7 @@ export default function App() {
     const trimmed = nextQuery.trim();
 
     if (!trimmed) {
-      setStatusText("Nejdriv zadej SPZ nebo VIN.");
+      setStatusText("Nejdriv zadej SPZ, ICO nebo VIN.");
       setError("");
       setResult(null);
       return;
@@ -122,7 +122,12 @@ export default function App() {
     setStatusText("Nacitam data...");
 
     try {
-      const response = await fetch(`/api/lookup?query=${encodeURIComponent(trimmed)}`, {
+      const queryType = detectType(trimmed);
+      const endpoint =
+        queryType === "ico"
+          ? `/api/company-fleet?ico=${encodeURIComponent(trimmed)}`
+          : `/api/lookup?query=${encodeURIComponent(trimmed)}`;
+      const response = await fetch(endpoint, {
         headers: { Accept: "application/json" }
       });
       const payload = await response.json();
@@ -133,7 +138,9 @@ export default function App() {
 
       setResult(payload);
       setStatusText(
-        payload.inspectionLookup?.status === "pending"
+        payload.kind === "fleet"
+          ? "Hotovo. Seznam vozidel firmy je pripraveny."
+          : payload.inspectionLookup?.status === "pending"
           ? "Zaklad je pripraveny. Technicke prohlidky se nacitaji na pozadi."
           : "Hotovo. Vysledek je pripraveny."
       );
@@ -152,6 +159,12 @@ export default function App() {
 
   function handleQueryChange(value) {
     setQuery(value);
+    const compact = String(value || "").replace(/\D/g, "");
+    if (selectedType === "ico" && compact.length <= 8) {
+      setSelectedType("ico");
+      return;
+    }
+
     setSelectedType(detectType(value));
   }
 
@@ -184,18 +197,13 @@ export default function App() {
           <Card className="border-white/10 bg-card/80 backdrop-blur-xl">
             <CardContent className="p-4 sm:p-5">
               <div className="mb-5 flex justify-center">
-                <div className="relative inline-grid w-[220px] grid-cols-2 rounded-full border border-border bg-secondary p-1">
-                  <div
-                    className={cn(
-                      "absolute inset-y-1 left-1 w-[calc(50%-0.25rem)] rounded-full bg-primary shadow-lg shadow-black/30 transition-transform duration-1000",
-                      selectedType === "vin" ? "translate-x-full" : "translate-x-0"
-                    )}
-                    style={{ transitionTimingFunction: "cubic-bezier(0.22, 1, 0.36, 1)" }}
-                  />
+                <div className="inline-grid w-[320px] grid-cols-3 rounded-full border border-border bg-secondary p-1">
                   <button
                     className={cn(
-                      "relative z-10 rounded-full px-4 py-2 text-sm font-semibold transition-colors duration-300",
-                      selectedType === "plate" ? "text-primary-foreground" : "text-muted-foreground"
+                      "rounded-full px-4 py-2 text-sm font-semibold transition-all duration-300",
+                      selectedType === "plate"
+                        ? "bg-primary text-primary-foreground shadow-lg shadow-black/30"
+                        : "text-muted-foreground"
                     )}
                     onClick={() => setSelectedType("plate")}
                     type="button"
@@ -204,13 +212,27 @@ export default function App() {
                   </button>
                   <button
                     className={cn(
-                      "relative z-10 rounded-full px-4 py-2 text-sm font-semibold transition-colors duration-300",
-                      selectedType === "vin" ? "text-primary-foreground" : "text-muted-foreground"
+                      "rounded-full px-4 py-2 text-sm font-semibold transition-all duration-300",
+                      selectedType === "vin"
+                        ? "bg-primary text-primary-foreground shadow-lg shadow-black/30"
+                        : "text-muted-foreground"
                     )}
                     onClick={() => setSelectedType("vin")}
                     type="button"
                   >
                     VIN
+                  </button>
+                  <button
+                    className={cn(
+                      "rounded-full px-4 py-2 text-sm font-semibold transition-all duration-300",
+                      selectedType === "ico"
+                        ? "bg-primary text-primary-foreground shadow-lg shadow-black/30"
+                        : "text-muted-foreground"
+                    )}
+                    onClick={() => setSelectedType("ico")}
+                    type="button"
+                  >
+                    ICO
                   </button>
                 </div>
               </div>
@@ -227,6 +249,8 @@ export default function App() {
                       placeholder={
                         selectedType === "vin"
                           ? "Napr. WAUZZZF41NA010563"
+                          : selectedType === "ico"
+                            ? "Napr. 27074358"
                           : "Napr. 1AB2345"
                       }
                       value={query}
@@ -276,11 +300,13 @@ export default function App() {
 
         {hasSearched && (
           <section className="mx-auto w-full max-w-6xl">
-            {loading ? <LoadingState /> : null}
-            {!loading && error ? <ErrorState message={error} type={detectedType} query={query} /> : null}
-            {!loading && !error && result ? <ResultState result={result} /> : null}
-          </section>
-        )}
+          {loading ? <LoadingState /> : null}
+          {!loading && error ? <ErrorState message={error} type={detectedType} query={query} /> : null}
+          {!loading && !error && result ? (
+            result.kind === "fleet" ? <CompanyFleetState result={result} /> : <ResultState result={result} />
+          ) : null}
+        </section>
+      )}
       </main>
     </div>
   );
@@ -433,6 +459,83 @@ function ResultState({ result }) {
           </CardContent>
         </Card>
       ) : null}
+    </div>
+  );
+}
+
+function CompanyFleetState({ result }) {
+  const records = Array.isArray(result.records) ? result.records : [];
+  const companyName = result.company?.name || `Firma ${result.company?.ico || result.query?.normalized || ""}`;
+
+  return (
+    <div className="space-y-4">
+      <Card className="border-white/10 bg-card/85 backdrop-blur-xl">
+        <CardContent className="p-6 sm:p-8">
+          <div className="space-y-5">
+            <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+              <div className="space-y-3">
+                <div className="flex flex-wrap gap-2">
+                  <Badge>Pravnicka osoba</Badge>
+                  <Badge variant="muted">Flotila dle ICO</Badge>
+                </div>
+                <div>
+                  <h2 className="text-3xl font-semibold tracking-[-0.04em] text-white sm:text-5xl">
+                    {companyName}
+                  </h2>
+                  <p className="mt-3 max-w-3xl text-sm leading-7 text-muted-foreground sm:text-base">
+                    Seznam vozidel navazanych na ICO v otevrenych datech Registru silnicnich vozidel.
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid gap-2 sm:grid-cols-2 xl:min-w-[320px]">
+                <IdentifierCard label="ICO" value={result.company?.ico || result.query?.normalized || "-"} />
+                <IdentifierCard label="Adresa" value={result.company?.address || "-"} />
+              </div>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <MiniStat label="Vozidla" value={result.summary?.vehicleCount} />
+              <MiniStat label="Aktualni" value={result.summary?.currentVehicleCount} />
+              <MiniStat label="Vztahy" value={result.summary?.relationshipCount} />
+              <MiniStat label="Zobrazeno" value={result.summary?.displayedCount} />
+            </div>
+
+            <div className="flex flex-wrap gap-2 text-sm text-muted-foreground">
+              <InlineMeta icon={Building2} value={`ICO | ${result.query?.normalized || "-"}`} />
+              <InlineMeta icon={Clock3} value={`Aktualizovano ${formatResolvedTime(result.query?.resolvedAt)}`} />
+              {result.summary?.sourceUpdatedAt ? (
+                <InlineMeta icon={FileText} value={`Dataset ${formatDate(result.summary.sourceUpdatedAt)}`} />
+              ) : null}
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="border-white/10 bg-card/78">
+        <CardHeader className="pb-4">
+          <CardDescription className="uppercase tracking-[0.22em] text-muted-foreground">
+            Vozidla firmy
+          </CardDescription>
+          <CardTitle className="text-2xl text-white">
+            {records.length > 0 ? "Seznam vozidel" : "Bez vozidel"}
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {records.length > 0 ? (
+            records.map((record, index) => (
+              <CompanyVehicleRow key={`${record.pcv || record.vin || index}-${index}`} record={record} />
+            ))
+          ) : (
+            <EmptyPanel text="Pro zadane ICO nebyla v otevrenych datech nalezena zadna vozidla." />
+          )}
+          {result.summary?.truncated ? (
+            <p className="text-sm leading-7 text-muted-foreground">
+              Vysledek byl zkracen na prvnich 200 vozidel, aby zustal rychly a citelny.
+            </p>
+          ) : null}
+        </CardContent>
+      </Card>
     </div>
   );
 }
@@ -667,6 +770,43 @@ function DetailRow({ item }) {
   );
 }
 
+function CompanyVehicleRow({ record }) {
+  const title = [record.make, record.model, record.type].filter(Boolean).join(" ").trim() || record.vin || record.pcv || "Vozidlo";
+
+  return (
+    <div className="grid gap-4 rounded-[1.1rem] border border-white/8 bg-background/50 px-4 py-4 xl:grid-cols-[minmax(0,1fr)_260px]">
+      <div className="min-w-0">
+        <div className="flex flex-wrap gap-2">
+          {(record.relations || []).map((relation, index) => (
+            <Badge key={`${relation.relation}-${index}`} variant={relation.current ? "success" : "muted"}>
+              {relation.relation || "Subjekt"}{relation.current ? " · aktualni" : ""}
+            </Badge>
+          ))}
+        </div>
+
+        <p className="mt-3 text-lg font-semibold text-white">{title}</p>
+        <p className="mt-2 text-sm leading-7 text-muted-foreground">
+          {[
+            record.category || null,
+            record.fuel || null,
+            record.firstRegistration ? `1. registrace ${formatDate(record.firstRegistration)}` : null,
+            record.status || null,
+            !record.firstRegistration && record.firstSeen ? `vztah od ${formatDate(record.firstSeen)}` : null,
+            !record.status && record.lastSeen ? `do ${formatDate(record.lastSeen)}` : null
+          ]
+            .filter(Boolean)
+            .join(" · ") || "Bez dalsich technickych detailu."}
+        </p>
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-1">
+        <IdentifierCard label="VIN" value={record.vin || "-"} />
+        <IdentifierCard label="PCV" value={record.pcv || "-"} />
+      </div>
+    </div>
+  );
+}
+
 function extractIdentifierHighlights(highlights) {
   const items = Array.isArray(highlights) ? highlights : [];
   const preferred = ["SPZ", "VIN"]
@@ -746,7 +886,7 @@ function ErrorState({ message, query, type }) {
               <p className="text-sm font-semibold text-white">Posledni dotaz</p>
             </div>
             <p className="text-sm leading-7 text-muted-foreground">
-              {(type === "vin" ? "VIN" : "SPZ") + (query ? `: ${query}` : "")}
+              {(type === "vin" ? "VIN" : type === "ico" ? "ICO" : "SPZ") + (query ? `: ${query}` : "")}
             </p>
           </div>
         </div>
@@ -823,11 +963,35 @@ function detectType(value) {
     .toUpperCase()
     .replace(/[^A-Z0-9]/g, "");
 
+  if (/^\d{8}$/.test(compact) && isValidIco(compact)) {
+    return "ico";
+  }
+
   if (/^[A-HJ-NPR-Z0-9]{17}$/.test(compact)) {
     return "vin";
   }
 
   return "plate";
+}
+
+function isValidIco(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (!/^\d{8}$/.test(digits)) {
+    return false;
+  }
+
+  const weights = [8, 7, 6, 5, 4, 3, 2];
+  const sum = weights.reduce((accumulator, weight, index) => accumulator + Number(digits[index]) * weight, 0);
+  const mod = sum % 11;
+  let checkDigit = 11 - mod;
+
+  if (checkDigit === 10) {
+    checkDigit = 0;
+  } else if (checkDigit === 11) {
+    checkDigit = 1;
+  }
+
+  return checkDigit === Number(digits[7]);
 }
 
 function composeErrorMessage(payload) {
@@ -853,7 +1017,7 @@ function renderQuery(query) {
     return "Bez dotazu";
   }
 
-  return `${query.type === "vin" ? "VIN" : "SPZ"} | ${query.raw || query.normalized || ""}`;
+  return `${query.type === "vin" ? "VIN" : query.type === "ico" ? "ICO" : "SPZ"} | ${query.raw || query.normalized || ""}`;
 }
 
 function formatResolvedTime(value) {

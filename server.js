@@ -39,6 +39,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (requestUrl.pathname === "/api/company-fleet") {
+      await handleCompanyFleetLookup(requestUrl, res);
+      return;
+    }
+
     if (requestUrl.pathname === "/api/health") {
       const runtimeStatus = safeGetLookupRuntimeStatus();
       sendJson(res, 200, {
@@ -221,6 +226,29 @@ function getVehicleService() {
   } catch (error) {
     vehicleServiceLoadError = error;
     throw error;
+  }
+}
+
+async function handleCompanyFleetLookup(requestUrl, res) {
+  const ico = (requestUrl.searchParams.get("ico") || "").trim();
+
+  if (!ico) {
+    sendJson(res, 400, {
+      message: "Zadejte ICO pravnicke osoby.",
+      hints: ["Napriklad 27074358."]
+    });
+    return;
+  }
+
+  try {
+    const { lookupVehiclesByIco } = getVehicleService();
+    const result = await lookupVehiclesByIco(ico);
+    sendJson(res, 200, result);
+  } catch (error) {
+    sendJson(res, 502, {
+      message: "Nepodarilo se nacist seznam vozidel pro zadane ICO.",
+      detail: error.message
+    });
   }
 }
 

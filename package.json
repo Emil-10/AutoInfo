@@ -7,6 +7,7 @@
     "build": "vite build",
     "dev": "node server.js",
     "frontend:dev": "vite",
+    "postinstall": "node node_modules/playwright-core/cli.js install chromium",
     "start": "node server.js"
   },
   "dependencies": {

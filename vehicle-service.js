@@ -10,9 +10,12 @@ const ENABLE_MOCK_DATA = String(process.env.ENABLE_MOCK_DATA || "true").toLowerC
 const ARES_ENABLED = String(process.env.ARES_ENABLED || "true").toLowerCase() !== "false";
 const UNIQA_LOOKUP_ENABLED = String(process.env.UNIQA_LOOKUP_ENABLED || "true").toLowerCase() !== "false";
 const UNIQA_PHONE = normalizeWhitespace(process.env.UNIQA_PHONE || "+420 700 700 700") || "+420 700 700 700";
-const UNIQA_HEADLESS = String(process.env.UNIQA_HEADLESS || "false").toLowerCase() === "true";
+const UNIQA_HEADLESS = String(process.env.UNIQA_HEADLESS || (process.platform === "linux" ? "true" : "false")).toLowerCase() === "true";
 const UNIQA_BROWSER_INFO = resolveUniqaBrowserInfo();
 const UNIQA_BROWSER_PATH = UNIQA_BROWSER_INFO.path;
+const UNIQA_USER_AGENT =
+  process.env.UNIQA_USER_AGENT ||
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
 const UNIQA_CACHE_TTL_MS = Math.max(0, Number(process.env.UNIQA_CACHE_TTL_MS || 900000) || 900000);
 const UNIQA_LOOKUP_CACHE = new Map();
 const OPEN_DATA_CACHE_TTL_MS = Math.max(60000, Number(process.env.OPEN_DATA_CACHE_TTL_MS || 21600000) || 21600000);
@@ -28,10 +31,18 @@ const OPEN_DATA_INSPECTION_FILE = path.join(OPEN_DATA_PERSIST_DIR, "inspections-
 const OPEN_DATA_DATASET_FILE = path.join(OPEN_DATA_PERSIST_DIR, "datasets.json");
 const OPEN_DATA_VEHICLE_ROUTE = "/vypiszregistru/vypisvozidel";
 const OPEN_DATA_INSPECTION_ROUTE = "/vypiszregistru/technickeprohlidky";
+const OPEN_DATA_OWNER_ROUTE = "/vypiszregistru/vlastnikprovozovatelvozidla";
+const OPEN_DATA_IMPORT_ROUTE = "/vypiszregistru/vozidladovoz";
+const OPEN_DATA_DEREG_ROUTE = "/vypiszregistru/vozidlavyrazenazprovozu";
 let openDataPersistentLoaded = false;
 let openDataPersistPromise = null;
 const OPEN_DATA_DATASET_CACHE = Object.create(null);
 const OPEN_DATA_JOBS = new Map();
+const TAXI_LOOKUP_CACHE = new Map();
+const POLICE_WANTED_CACHE = new Map();
+const OPEN_DATA_IMPORT_CACHE = new Map();
+const OPEN_DATA_DEREG_CACHE = new Map();
+const ICO_FLEET_CACHE = new Map();
 
 const MOCK_VEHICLES = [
   {
@@ -251,6 +262,10 @@ function getLookupRuntimeStatus() {
     runtime.warnings.push("UNIQA_BROWSER_PATH je nastaveny, ale soubor na disku neexistuje.");
   }
 
+  if (runtime.uniqaFallback.enabled && runtime.platform === "linux" && runtime.uniqaFallback.headless) {
+    runtime.warnings.push("UNIQA fallback bezi v headless stealth rezimu. Pri zmene anti-bot ochrany muze byt potreba doladeni.");
+  }
+
   if (runtime.uniqaFallback.enabled && !runtime.uniqaFallback.headless && runtime.platform === "linux" && !runtime.uniqaFallback.displayAvailable) {
     runtime.warnings.push(
       "UNIQA fallback v headed rezimu na Linuxu potrebuje DISPLAY. Na Railway aplikaci spoustejte pres Xvfb."
@@ -385,7 +400,8 @@ async function lookupVehicle(query, options = {}) {
 
   const enriched = await enrichCompanies(record);
   const withInspectionState = await attachInspectionState(enriched, options);
-  const sanitized = sanitizeClientRecord(withInspectionState);
+  const withRegistryState = await attachPublicRegistryState(withInspectionState);
+  const sanitized = sanitizeClientRecord(withRegistryState);
   return {
     diagnostics,
     record: {
@@ -628,7 +644,7 @@ async function lookupFromUniqaBrowser(lookup, diagnostics) {
     recordLookupAttempt(diagnostics, {
       source: "uniqa-browser",
       status: "missing_config",
-      detail: "Nebyl nalezen browser pro UNIQA fallback. Na Railway je potreba image s Playwright Chromium."
+      detail: "Nebyl nalezen browser pro UNIQA fallback. Overte, ze pri deployi probehl postinstall stahujici Chromium."
     });
     return null;
   }
@@ -694,9 +710,12 @@ async function executeUniqaBrowserLookup(lookup, attempt) {
   try {
     const page = await browser.newPage({
       locale: "cs-CZ",
-      viewport: { width: 1366, height: 900 }
+      viewport: { width: 1366, height: 900 },
+      userAgent: UNIQA_USER_AGENT
     });
     const responses = [];
+
+    await applyUniqaStealth(page);
 
     page.on("response", async (response) => {
       if (!response.url().includes("/rest/public/v1/calculator/motor/vehicle")) {
@@ -747,6 +766,20 @@ async function executeUniqaBrowserLookup(lookup, attempt) {
   } finally {
     await browser.close().catch(() => {});
   }
+}
+
+async function applyUniqaStealth(page) {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "webdriver", {
+      get: () => undefined
+    });
+    Object.defineProperty(navigator, "languages", {
+      get: () => ["cs-CZ", "cs", "en-US", "en"]
+    });
+    Object.defineProperty(navigator, "plugins", {
+      get: () => [1, 2, 3, 4]
+    });
+  });
 }
 
 function normalizeUniqaPayload(payload, lookup) {
@@ -1891,6 +1924,376 @@ async function attachInspectionState(record, options = {}) {
   return nextRecord;
 }
 
+async function attachPublicRegistryState(record) {
+  if (!record || typeof record !== "object") {
+    return record;
+  }
+
+  await ensureOpenDataPersistentCachesLoaded();
+
+  const plate = normalizeWhitespace(extractIdentifier(record, "SPZ")).toUpperCase() || null;
+  const vin = normalizeWhitespace(extractIdentifier(record, "VIN")).toUpperCase() || null;
+  let pcv = normalizeWhitespace(extractIdentifier(record, "PČV")) || null;
+
+  if (!pcv && vin) {
+    pcv = getPersistentPcv(vin) || null;
+  }
+
+  if (!pcv && vin) {
+    try {
+      pcv = await resolvePcvForVin(vin);
+      if (pcv) {
+        await storePersistentPcv(vin, pcv);
+      }
+    } catch (error) {
+      pcv = null;
+    }
+  }
+
+  const [taxi, policeWanted, importRecord, deregistration] = await Promise.all([
+    plate ? lookupTaxiVehicleRegistration(plate) : Promise.resolve(null),
+    plate || vin ? lookupPoliceWantedVehicle({ plate, vin }) : Promise.resolve(null),
+    pcv ? lookupImportedVehicleByPcv(pcv) : Promise.resolve(null),
+    pcv ? lookupDeregisteredVehicleByPcv(pcv) : Promise.resolve(null)
+  ]);
+
+  const inspectionAudit = buildInspectionAudit(record.inspections || null, record.inspectionLookup || null, pcv);
+  const nextRecord = clone(record);
+  nextRecord.registryChecks = {
+    taxi,
+    policeWanted,
+    importRecord,
+    deregistration,
+    inspectionAudit
+  };
+
+  return mergeRegistryStateIntoRecord(nextRecord);
+}
+
+async function lookupTaxiVehicleRegistration(plate) {
+  const normalizedPlate = normalizeWhitespace(plate).toUpperCase();
+  if (!normalizedPlate) {
+    return null;
+  }
+
+  const cached = getTimedCacheValue(TAXI_LOOKUP_CACHE, normalizedPlate);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  try {
+    const response = await requestJson("https://doprava.gov.cz/pd-api/rpsd/services/taxiApi/v1/checkVehicleRegistration", {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        registrationPlates: [normalizedPlate]
+      }),
+      timeoutMs: 15000
+    });
+
+    const resultEntry = Array.isArray(response?.registrationPlates)
+      ? response.registrationPlates.find((entry) => normalizeWhitespace(entry?.registrationPlate).toUpperCase() === normalizedPlate)
+      : null;
+    const payload = {
+      plate: normalizedPlate,
+      status: normalizeTaxiResult(resultEntry?.result),
+      result: resultEntry?.result || null,
+      checkedAt: new Date().toISOString(),
+      dataValidAsOf: response?.dataValidAsOf || null,
+      sourceStatus: response?.status || null,
+      sourceMessages: uniqueText(response?.statusMessagesCz || [])
+    };
+
+    setTimedCacheValue(TAXI_LOOKUP_CACHE, normalizedPlate, payload);
+    return payload;
+  } catch (error) {
+    const payload = {
+      plate: normalizedPlate,
+      status: "error",
+      checkedAt: new Date().toISOString(),
+      detail: formatLookupError(error)
+    };
+    setTimedCacheValue(TAXI_LOOKUP_CACHE, normalizedPlate, payload);
+    return payload;
+  }
+}
+
+async function lookupPoliceWantedVehicle({ plate, vin }) {
+  const normalizedPlate = normalizeWhitespace(plate).toUpperCase() || null;
+  const normalizedVin = normalizeWhitespace(vin).toUpperCase() || null;
+  const cacheKey = normalizedPlate || normalizedVin;
+
+  if (!cacheKey) {
+    return null;
+  }
+
+  const cached = getTimedCacheValue(POLICE_WANTED_CACHE, cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  try {
+    const initialHtml = await requestText("https://aplikace.policie.gov.cz/patrani-vozidla/", {
+      method: "GET",
+      headers: buildHtmlRequestHeaders("https://aplikace.policie.gov.cz/patrani-vozidla/")
+    });
+    const $initial = cheerio.load(initialHtml);
+    const formBody = new URLSearchParams();
+
+    $initial("input[type='hidden'][name]").each((_, input) => {
+      const name = $initial(input).attr("name");
+      if (name) {
+        formBody.set(name, $initial(input).attr("value") || "");
+      }
+    });
+
+    formBody.set("ctl00$Application$txtSPZ", normalizedPlate || "");
+    formBody.set("ctl00$Application$txtVIN", normalizedVin || "");
+    formBody.set("ctl00$Application$cmdHledej", "Vyhledat");
+    if (!formBody.has("ctl00$Application$CurrentPage")) {
+      formBody.set("ctl00$Application$CurrentPage", "1");
+    }
+
+    const html = await requestText("https://aplikace.policie.gov.cz/patrani-vozidla/", {
+      method: "POST",
+      headers: {
+        ...buildHtmlRequestHeaders("https://aplikace.policie.gov.cz/patrani-vozidla/"),
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: formBody.toString(),
+      timeoutMs: 20000
+    });
+
+    const payload = parsePoliceWantedResponse(html, { plate: normalizedPlate, vin: normalizedVin });
+    setTimedCacheValue(POLICE_WANTED_CACHE, cacheKey, payload);
+    return payload;
+  } catch (error) {
+    const payload = {
+      query: normalizedPlate || normalizedVin,
+      status: "error",
+      checkedAt: new Date().toISOString(),
+      detail: formatLookupError(error)
+    };
+    setTimedCacheValue(POLICE_WANTED_CACHE, cacheKey, payload);
+    return payload;
+  }
+}
+
+function parsePoliceWantedResponse(html, query) {
+  const $ = cheerio.load(html || "");
+  const output = normalizeWhitespace($("#Application_lblOutput").text());
+  const sourceUpdatedAt = normalizeWhitespace($("#Application_lblAktualizace b").text()) || null;
+  const listing = normalizeWhitespace($(".vypisZaznamu").text());
+  const clear =
+    output.toLowerCase().includes("nebyl nalezen") ||
+    listing.toLowerCase().includes("nebyl nalezen");
+
+  return {
+    query: query?.plate || query?.vin || null,
+    status: clear ? "clear" : "wanted",
+    checkedAt: new Date().toISOString(),
+    sourceUpdatedAt,
+    detail: clear
+      ? output || "V policejni evidenci nebylo nalezeno aktivni patrani."
+      : firstNonEmpty([
+          output,
+          listing.replace(output, "").trim(),
+          "V policejni evidenci bylo nalezeno aktivni patrani."
+        ])
+  };
+}
+
+async function lookupImportedVehicleByPcv(pcv) {
+  const normalizedPcv = normalizeWhitespace(pcv);
+  if (!normalizedPcv) {
+    return null;
+  }
+
+  const cached = getTimedCacheValue(OPEN_DATA_IMPORT_CACHE, normalizedPcv);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  try {
+    const dataset = await ensureOpenDataDatasetLocal("imports", OPEN_DATA_IMPORT_ROUTE);
+    const payload = await findSingleOpenDataRowByPcv(dataset.localPath, normalizedPcv, normalizeImportRow);
+    const result = payload
+      ? {
+          ...payload,
+          sourceUpdatedAt: dataset.datasetDate || null,
+          sourceFile: dataset.filename || null
+        }
+      : null;
+    setTimedCacheValue(OPEN_DATA_IMPORT_CACHE, normalizedPcv, result);
+    return result;
+  } catch (error) {
+    const payload = {
+      pcv: normalizedPcv,
+      status: "error",
+      detail: formatLookupError(error)
+    };
+    setTimedCacheValue(OPEN_DATA_IMPORT_CACHE, normalizedPcv, payload);
+    return payload;
+  }
+}
+
+async function lookupDeregisteredVehicleByPcv(pcv) {
+  const normalizedPcv = normalizeWhitespace(pcv);
+  if (!normalizedPcv) {
+    return null;
+  }
+
+  const cached = getTimedCacheValue(OPEN_DATA_DEREG_CACHE, normalizedPcv);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  try {
+    const dataset = await ensureOpenDataDatasetLocal("deregistered", OPEN_DATA_DEREG_ROUTE);
+    const matches = await findOpenDataRowsByPcv(dataset.localPath, normalizedPcv, normalizeDeregisteredRow);
+    const latest = matches.sort((left, right) => compareDatesDesc(left.dateFrom || left.dateTo, right.dateFrom || right.dateTo))[0] || null;
+    const result = latest
+      ? {
+          ...latest,
+          active: isDeregisteredRecordActive(latest),
+          sourceUpdatedAt: dataset.datasetDate || null,
+          sourceFile: dataset.filename || null
+        }
+      : null;
+    setTimedCacheValue(OPEN_DATA_DEREG_CACHE, normalizedPcv, result);
+    return result;
+  } catch (error) {
+    const payload = {
+      pcv: normalizedPcv,
+      status: "error",
+      detail: formatLookupError(error)
+    };
+    setTimedCacheValue(OPEN_DATA_DEREG_CACHE, normalizedPcv, payload);
+    return payload;
+  }
+}
+
+function buildInspectionAudit(inspections, inspectionLookup, pcv) {
+  const summary = inspections?.summary || null;
+  const sourceUpdatedAt = inspections?.sourceUpdatedAt || null;
+  const status = inspectionLookup?.status || (summary ? "ready" : "unavailable");
+  const currentStatus = summary?.status || null;
+  const recordCount = summary?.totalCount || 0;
+  const score = computeInspectionAuditScore({ status, currentStatus, recordCount, sourceUpdatedAt });
+
+  return {
+    status,
+    currentStatus,
+    recordCount,
+    sourceUpdatedAt,
+    lastKnownDate: summary?.lastKnownDate || null,
+    pcv: normalizeWhitespace(pcv) || inspections?.pcv || null,
+    score
+  };
+}
+
+function computeInspectionAuditScore({ status, currentStatus, recordCount, sourceUpdatedAt }) {
+  if (status !== "ready") {
+    return null;
+  }
+
+  let score = 35;
+  if (recordCount >= 3) {
+    score += 20;
+  } else if (recordCount >= 1) {
+    score += 10;
+  }
+
+  if (String(currentStatus || "").toLowerCase().includes("plat")) {
+    score += 30;
+  } else if (String(currentStatus || "").toLowerCase().includes("konci")) {
+    score += 10;
+  }
+
+  if (sourceUpdatedAt && diffDaysFromToday(sourceUpdatedAt) !== null && Math.abs(diffDaysFromToday(sourceUpdatedAt)) <= 40) {
+    score += 15;
+  }
+
+  return Math.max(0, Math.min(100, score));
+}
+
+function mergeRegistryStateIntoRecord(record) {
+  if (!record || typeof record !== "object") {
+    return record;
+  }
+
+  const nextRecord = clone(record);
+  const checks = nextRecord.registryChecks || {};
+
+  if (checks.taxi) {
+    nextRecord.highlights = upsertHighlight(
+      nextRecord.highlights,
+      "Taxi",
+      formatTaxiBadge(checks.taxi),
+      mapStatusTone(checks.taxi.status, { valid: "positive", error: "warning", defaultTone: "neutral" })
+    );
+  }
+
+  if (checks.policeWanted) {
+    nextRecord.highlights = upsertHighlight(
+      nextRecord.highlights,
+      "Patrani PCR",
+      checks.policeWanted.status === "wanted" ? "Aktivni" : checks.policeWanted.status === "clear" ? "Bez zaznamu" : "Neovereno",
+      mapStatusTone(checks.policeWanted.status, { wanted: "danger", error: "warning", defaultTone: "neutral" })
+    );
+  }
+
+  if (checks.deregistration?.active) {
+    nextRecord.hero = {
+      ...nextRecord.hero,
+      status: "Vyrazeno z provozu"
+    };
+  } else if (checks.policeWanted?.status === "wanted") {
+    nextRecord.hero = {
+      ...nextRecord.hero,
+      status: "Aktivni patrani"
+    };
+  }
+
+  nextRecord.sections = upsertSectionItems(nextRecord.sections, "Verejne registry", [
+    checks.taxi ? item("Evidence taxi", formatTaxiSectionValue(checks.taxi), mapStatusTone(checks.taxi.status, { valid: "positive", error: "warning", defaultTone: "neutral" })) : null,
+    checks.policeWanted ? item("Patrani PCR", formatPoliceWantedValue(checks.policeWanted), mapStatusTone(checks.policeWanted.status, { wanted: "danger", error: "warning", defaultTone: "neutral" })) : null,
+    checks.importRecord ? item("Dovoz vozidla", formatImportRecordValue(checks.importRecord)) : null,
+    checks.deregistration ? item("Vyrazeni z provozu", formatDeregistrationValue(checks.deregistration), checks.deregistration.active ? "warning" : "neutral") : null
+  ]);
+
+  nextRecord.sections = upsertSectionItems(nextRecord.sections, "Audit dat", [
+    checks.inspectionAudit ? item("Audit STK", formatInspectionAuditValue(checks.inspectionAudit), checks.inspectionAudit.score >= 75 ? "positive" : checks.inspectionAudit.score >= 45 ? "warning" : "neutral") : null,
+    checks.inspectionAudit?.recordCount ? item("Zaznamy STK", String(checks.inspectionAudit.recordCount)) : null,
+    checks.inspectionAudit?.sourceUpdatedAt ? item("Dataset STK", formatDate(checks.inspectionAudit.sourceUpdatedAt)) : null,
+    checks.inspectionAudit?.pcv ? item("PČV audit", checks.inspectionAudit.pcv) : null
+  ]);
+
+  nextRecord.timeline = mergeTimeline(nextRecord.timeline || [], [
+    checks.importRecord?.importDate
+      ? {
+          date: normalizeTimelineDate(checks.importRecord.importDate),
+          title: "Dovoz vozidla",
+          description: checks.importRecord.country ? `Stat dovozu ${checks.importRecord.country}` : "Vozidlo bylo evidovano jako dovezene.",
+          tone: "neutral"
+        }
+      : null,
+    checks.deregistration?.dateFrom
+      ? {
+          date: normalizeTimelineDate(checks.deregistration.dateFrom),
+          title: "Vyrazeni z provozu",
+          description: formatDeregistrationValue(checks.deregistration),
+          tone: checks.deregistration.active ? "warning" : "neutral"
+        }
+      : null
+  ].filter(Boolean));
+
+  return nextRecord;
+}
+
 async function lookupVehicleInspections(params = {}) {
   await ensureOpenDataPersistentCachesLoaded();
 
@@ -2294,6 +2697,556 @@ async function persistOpenDataCacheFiles() {
 
 async function persistOpenDataDatasets() {
   await writeJsonFile(OPEN_DATA_DATASET_FILE, OPEN_DATA_DATASET_CACHE);
+}
+
+async function lookupVehiclesByIco(queryIco) {
+  const ico = sanitizeIco(queryIco);
+  const normalizedQuery = normalizeWhitespace(queryIco);
+
+  if (!ico) {
+    return {
+      kind: "fleet",
+      query: {
+        raw: normalizedQuery,
+        normalized: normalizedQuery,
+        type: "ico",
+        resolvedAt: new Date().toISOString()
+      },
+      company: null,
+      summary: {
+        vehicleCount: 0,
+        displayedCount: 0,
+        currentVehicleCount: 0,
+        relationshipCount: 0,
+        truncated: false,
+        sourceUpdatedAt: null
+      },
+      records: []
+    };
+  }
+
+  const cached = getTimedCacheValue(ICO_FLEET_CACHE, ico);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  await ensureOpenDataPersistentCachesLoaded();
+
+  const [company] = await Promise.all([
+    fetchCompanyFromAres(ico).catch(() => null)
+  ]);
+
+  const relations = [];
+  let sourceUpdatedAt = null;
+
+  await scanOpenDataCsv(OPEN_DATA_OWNER_ROUTE, ({ row, canonicalRow, metadata }) => {
+    if (sourceUpdatedAt === null) {
+      sourceUpdatedAt = metadata?.datasetDate || null;
+    }
+
+    if (sanitizeIco(firstNonEmpty([canonicalRow.ICO, row["IČO"]])) !== ico) {
+      return false;
+    }
+
+    relations.push(normalizeCompanyVehicleRelation(row, canonicalRow));
+    return false;
+  });
+
+  const groupedRecords = Array.from(
+    relations.reduce((map, relation) => {
+      const key = relation.pcv || `${relation.relation}-${relation.dateFrom}-${relation.dateTo}`;
+      if (!map.has(key)) {
+        map.set(key, {
+          pcv: relation.pcv || null,
+          title: relation.pcv ? `Vozidlo ${relation.pcv}` : "Vozidlo bez PČV",
+          current: Boolean(relation.current),
+          firstSeen: relation.dateFrom || null,
+          lastSeen: relation.dateTo || null,
+          relations: []
+        });
+      }
+
+      const current = map.get(key);
+      current.current = current.current || Boolean(relation.current);
+      current.firstSeen = current.firstSeen ? (compareDatesDesc(current.firstSeen, relation.dateFrom) > 0 ? current.firstSeen : relation.dateFrom || current.firstSeen) : relation.dateFrom || null;
+      current.lastSeen = current.lastSeen ? (compareDatesDesc(current.lastSeen, relation.dateTo) < 0 ? current.lastSeen : relation.dateTo || current.lastSeen) : relation.dateTo || null;
+      current.relations.push(relation);
+      return map;
+    }, new Map()).values()
+  );
+
+  const payload = {
+    kind: "fleet",
+    query: {
+      raw: normalizedQuery,
+      normalized: ico,
+      type: "ico",
+      resolvedAt: new Date().toISOString()
+    },
+    company: {
+      ico,
+      name: company?.name || firstNonEmpty(relations.map((relation) => relation.name)) || null,
+      address: company?.address || firstNonEmpty(relations.map((relation) => relation.address)) || null
+    },
+    summary: {
+      vehicleCount: groupedRecords.length,
+      displayedCount: groupedRecords.length,
+      currentVehicleCount: groupedRecords.filter((record) => record.current).length,
+      relationshipCount: relations.length,
+      truncated: false,
+      sourceUpdatedAt
+    },
+    records: groupedRecords.sort((left, right) => normalizeWhitespace(left.title).localeCompare(normalizeWhitespace(right.title), "cs"))
+  };
+
+  setTimedCacheValue(ICO_FLEET_CACHE, ico, payload);
+  return payload;
+}
+
+async function lookupVehiclesByIcoLegacy(queryIco) {
+  const ico = sanitizeIco(queryIco);
+  const normalizedQuery = normalizeWhitespace(queryIco);
+
+  if (!ico) {
+    return {
+      kind: "fleet",
+      query: {
+        raw: normalizedQuery,
+        normalized: normalizedQuery,
+        type: "ico",
+        resolvedAt: new Date().toISOString()
+      },
+      company: null,
+      summary: {
+        vehicleCount: 0,
+        displayedCount: 0,
+        currentVehicleCount: 0,
+        relationshipCount: 0,
+        truncated: false,
+        sourceUpdatedAt: null
+      },
+      records: []
+    };
+  }
+
+  const cached = getTimedCacheValue(ICO_FLEET_CACHE, ico);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  await ensureOpenDataPersistentCachesLoaded();
+
+  const [ownerDataset, vehicleDataset, company] = await Promise.all([
+    ensureOpenDataDatasetLocal("owners", OPEN_DATA_OWNER_ROUTE),
+    ensureOpenDataDatasetLocal("vehicles", OPEN_DATA_VEHICLE_ROUTE),
+    fetchCompanyFromAres(ico).catch(() => null)
+  ]);
+
+  const relations = await findCompanyVehicleRelationsByIcoInDataset(ownerDataset.localPath, ico);
+  const uniquePcvs = Array.from(new Set(relations.map((relation) => relation.pcv).filter(Boolean)));
+  const cappedPcvs = uniquePcvs.slice(0, 200);
+  const summaries = cappedPcvs.length > 0 ? await findVehicleSummariesByPcvsInDataset(vehicleDataset.localPath, cappedPcvs) : [];
+  const relationMap = new Map();
+
+  relations.forEach((relation) => {
+    const key = relation.pcv;
+    if (!key) {
+      return;
+    }
+
+    if (!relationMap.has(key)) {
+      relationMap.set(key, []);
+    }
+    relationMap.get(key).push(relation);
+  });
+
+  const records = summaries.map((summary) => ({
+    ...summary,
+    relations: relationMap.get(summary.pcv) || []
+  })).sort((left, right) => {
+    const leftName = normalizeWhitespace([left.make, left.model, left.type].filter(Boolean).join(" "));
+    const rightName = normalizeWhitespace([right.make, right.model, right.type].filter(Boolean).join(" "));
+    return leftName.localeCompare(rightName, "cs");
+  });
+
+  const payload = {
+    kind: "fleet",
+    query: {
+      raw: normalizedQuery,
+      normalized: ico,
+      type: "ico",
+      resolvedAt: new Date().toISOString()
+    },
+    company: {
+      ico,
+      name: company?.name || firstNonEmpty(relations.map((relation) => relation.name)) || null,
+      address: company?.address || firstNonEmpty(relations.map((relation) => relation.address)) || null
+    },
+    summary: {
+      vehicleCount: uniquePcvs.length,
+      displayedCount: records.length,
+      currentVehicleCount: new Set(relations.filter((relation) => relation.current).map((relation) => relation.pcv)).size,
+      relationshipCount: relations.length,
+      truncated: uniquePcvs.length > records.length,
+      sourceUpdatedAt: ownerDataset.datasetDate || vehicleDataset.datasetDate || null
+    },
+    records
+  };
+
+  setTimedCacheValue(ICO_FLEET_CACHE, ico, payload);
+  return payload;
+}
+
+async function findCompanyVehicleRelationsByIcoInDataset(filePath, ico) {
+  const normalizedIco = sanitizeIco(ico);
+  if (!normalizedIco) {
+    return [];
+  }
+
+  const stream = fs.createReadStream(filePath, { encoding: "utf8" });
+  const reader = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  let headers = null;
+  let canonicalHeaders = null;
+  const results = [];
+
+  for await (const rawLine of reader) {
+    const line = headers ? rawLine : rawLine.replace(/^\uFEFF/, "");
+    if (!headers) {
+      headers = parseCsvLine(line);
+      canonicalHeaders = headers.map(canonicalizeCsvHeader);
+      continue;
+    }
+
+    if (!line || !line.includes(normalizedIco)) {
+      continue;
+    }
+
+    const values = parseCsvLine(line);
+    const row = Object.create(null);
+    const canonicalRow = Object.create(null);
+    headers.forEach((header, index) => {
+      const value = values[index] === undefined ? "" : values[index];
+      row[header] = value;
+      canonicalRow[canonicalHeaders[index]] = value;
+    });
+
+    if (sanitizeIco(firstNonEmpty([canonicalRow.ICO, row["IČO"]])) !== normalizedIco) {
+      continue;
+    }
+
+    results.push(normalizeCompanyVehicleRelation(row, canonicalRow));
+  }
+
+  return results.filter(Boolean);
+}
+
+async function findVehicleSummariesByPcvsInDataset(filePath, pcvs) {
+  const wanted = new Set((Array.isArray(pcvs) ? pcvs : []).map((pcv) => normalizeWhitespace(pcv)).filter(Boolean));
+  if (wanted.size === 0) {
+    return [];
+  }
+
+  const stream = fs.createReadStream(filePath, { encoding: "utf8" });
+  const reader = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  let headers = null;
+  let canonicalHeaders = null;
+  const results = [];
+
+  for await (const rawLine of reader) {
+    const line = headers ? rawLine : rawLine.replace(/^\uFEFF/, "");
+    if (!headers) {
+      headers = parseCsvLine(line);
+      canonicalHeaders = headers.map(canonicalizeCsvHeader);
+      continue;
+    }
+
+    if (!line) {
+      continue;
+    }
+
+    const values = parseCsvLine(line);
+    const row = Object.create(null);
+    const canonicalRow = Object.create(null);
+    headers.forEach((header, index) => {
+      const value = values[index] === undefined ? "" : values[index];
+      row[header] = value;
+      canonicalRow[canonicalHeaders[index]] = value;
+    });
+
+    const pcv = normalizeWhitespace(firstNonEmpty([canonicalRow.PCV, row["PČV"]]));
+    if (!pcv || !wanted.has(pcv)) {
+      continue;
+    }
+
+    results.push(normalizeCompanyVehicleSummary(row, canonicalRow));
+    wanted.delete(pcv);
+
+    if (wanted.size === 0) {
+      break;
+    }
+  }
+
+  return results.filter(Boolean);
+}
+
+async function findSingleOpenDataRowByPcv(filePath, pcv, normalizer) {
+  const matches = await findOpenDataRowsByPcv(filePath, pcv, normalizer, 1);
+  return matches[0] || null;
+}
+
+async function findOpenDataRowsByPcv(filePath, pcv, normalizer, limit) {
+  const normalizedPcv = normalizeWhitespace(pcv);
+  if (!normalizedPcv) {
+    return [];
+  }
+
+  const stream = fs.createReadStream(filePath, { encoding: "utf8" });
+  const reader = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  let headers = null;
+  let canonicalHeaders = null;
+  const results = [];
+
+  for await (const rawLine of reader) {
+    const line = headers ? rawLine : rawLine.replace(/^\uFEFF/, "");
+    if (!headers) {
+      headers = parseCsvLine(line);
+      canonicalHeaders = headers.map(canonicalizeCsvHeader);
+      continue;
+    }
+
+    if (!line.startsWith(`${normalizedPcv},`)) {
+      continue;
+    }
+
+    const values = parseCsvLine(line);
+    const row = Object.create(null);
+    const canonicalRow = Object.create(null);
+    headers.forEach((header, index) => {
+      const value = values[index] === undefined ? "" : values[index];
+      row[header] = value;
+      canonicalRow[canonicalHeaders[index]] = value;
+    });
+
+    results.push(normalizer(row, canonicalRow));
+    if (limit && results.length >= limit) {
+      break;
+    }
+  }
+
+  return results.filter(Boolean);
+}
+
+function normalizeCompanyVehicleRelation(row, canonicalRow) {
+  return {
+    pcv: normalizeWhitespace(firstNonEmpty([canonicalRow.PCV, row["PČV"]])),
+    relation: normalizeWhitespace(firstNonEmpty([canonicalRow.VZTAHKVOZIDLU, row["Vztah k vozidlu"]])) || "Subjekt",
+    subjectType: normalizeWhitespace(firstNonEmpty([canonicalRow.TYPSUBJEKTU, row["Typ subjektu"]])) || null,
+    current: normalizeBoolean(firstNonEmpty([canonicalRow.AKTUALNI, row["Aktuální"]])),
+    ico: sanitizeIco(firstNonEmpty([canonicalRow.ICO, row["IČO"]])),
+    name: normalizeWhitespace(firstNonEmpty([canonicalRow.NAZEV, row["Název"]])),
+    address: normalizeWhitespace(firstNonEmpty([canonicalRow.ADRESA, row.Adresa])),
+    dateFrom: normalizeOpenDataDate(firstNonEmpty([canonicalRow.DATUMOD, row["Datum od"]])),
+    dateTo: normalizeOpenDataDate(firstNonEmpty([canonicalRow.DATUMDO, row["Datum do"]]))
+  };
+}
+
+function normalizeCompanyVehicleSummary(row, canonicalRow) {
+  return {
+    pcv: normalizeWhitespace(firstNonEmpty([canonicalRow.PCV, row["PČV"]])),
+    vin: normalizeWhitespace(firstNonEmpty([canonicalRow.VIN, row.VIN])) || null,
+    make: normalizeWhitespace(firstNonEmpty([canonicalRow.TOVARNIZNACKA, row["Tovární značka"]])),
+    model: normalizeWhitespace(firstNonEmpty([canonicalRow.OBCHODNIOZNACENI, row["Obchodní označení"]])),
+    type: normalizeWhitespace(firstNonEmpty([canonicalRow.TYP, row.Typ])),
+    variant: normalizeWhitespace(firstNonEmpty([canonicalRow.VARIANTA, row.Varianta])),
+    status: normalizeWhitespace(firstNonEmpty([canonicalRow.STATUS, row.Status])) || null,
+    category: normalizeWhitespace(firstNonEmpty([canonicalRow.KATEGORIEVOZIDLA, row["Kategorie vozidla"]])),
+    fuel: normalizeWhitespace(firstNonEmpty([canonicalRow.PALIVO, row.Palivo])),
+    firstRegistration: normalizeOpenDataDate(firstNonEmpty([canonicalRow.DATUM1REGISTRACE, row["Datum 1. registrace"]])),
+    firstRegistrationCz: normalizeOpenDataDate(firstNonEmpty([canonicalRow.DATUM1REGISTRACEVCR, row["Datum 1. registrace v ČR"]])),
+    power: normalizeWhitespace(firstNonEmpty([canonicalRow.MAXVYKONKWMIN1, row["Max. výkon [kW] / [min⁻¹]"]])),
+    color: normalizeWhitespace(firstNonEmpty([canonicalRow.BARVA, row.Barva])) || null
+  };
+}
+
+function normalizeImportRow(row, canonicalRow) {
+  return {
+    pcv: normalizeWhitespace(firstNonEmpty([canonicalRow.PCV, row["PČV"]])),
+    country: normalizeWhitespace(firstNonEmpty([canonicalRow.STAT, row["Stát"]])) || null,
+    importDate: normalizeOpenDataDate(firstNonEmpty([canonicalRow.DATUMDOVOZU, row["Datum dovozu"]]))
+  };
+}
+
+function normalizeDeregisteredRow(row, canonicalRow) {
+  return {
+    pcv: normalizeWhitespace(firstNonEmpty([canonicalRow.PCV, row["PČV"]])),
+    dateFrom: normalizeOpenDataDate(firstNonEmpty([canonicalRow.DATUMOD, row["Datum od"]])),
+    dateTo: normalizeOpenDataDate(firstNonEmpty([canonicalRow.DATUMDO, row["Datum do"]])),
+    reason: normalizeWhitespace(firstNonEmpty([canonicalRow.DUVOD, row["Důvod"]])),
+    rmCode: normalizeWhitespace(firstNonEmpty([canonicalRow.RMKOD, row["RM kód"]])),
+    rmName: normalizeWhitespace(firstNonEmpty([canonicalRow.RMNAZEV, row["RM Název"]]))
+  };
+}
+
+function isDeregisteredRecordActive(record) {
+  if (!record?.dateFrom) {
+    return false;
+  }
+
+  if (!record.dateTo) {
+    return true;
+  }
+
+  const parsed = new Date(record.dateTo);
+  return !Number.isNaN(parsed.getTime()) && parsed.getTime() >= Date.now();
+}
+
+function buildHtmlRequestHeaders(referer) {
+  return {
+    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "cs-CZ,cs;q=0.9,en;q=0.8",
+    "Cache-Control": "no-cache",
+    Pragma: "no-cache",
+    Referer: referer,
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+  };
+}
+
+function normalizeTaxiResult(value) {
+  const normalized = normalizeWhitespace(value).toUpperCase();
+  if (normalized === "VALID") {
+    return "valid";
+  }
+  if (normalized === "NOT_VALID") {
+    return "not_valid";
+  }
+  if (normalized === "WRONG_FORMAT") {
+    return "wrong_format";
+  }
+  if (normalized === "SERVICE_ERROR") {
+    return "error";
+  }
+  return normalized ? normalized.toLowerCase() : "unknown";
+}
+
+function mapStatusTone(status, tones = {}) {
+  const normalized = normalizeWhitespace(status).toLowerCase();
+  if (normalized && tones[normalized]) {
+    return tones[normalized];
+  }
+  return tones.defaultTone || "neutral";
+}
+
+function formatTaxiBadge(taxi) {
+  if (!taxi) {
+    return null;
+  }
+
+  if (taxi.status === "valid") {
+    return "Evidovano";
+  }
+
+  if (taxi.status === "not_valid") {
+    return "Neevidovano";
+  }
+
+  if (taxi.status === "error") {
+    return "Neovereno";
+  }
+
+  return "Nezjisteno";
+}
+
+function formatTaxiSectionValue(taxi) {
+  if (!taxi) {
+    return null;
+  }
+
+  if (taxi.status === "valid") {
+    return `Platna evidence taxi k ${formatDate(taxi.dataValidAsOf)}`;
+  }
+
+  if (taxi.status === "not_valid") {
+    return `V evidenci taxi neni k ${formatDate(taxi.dataValidAsOf)}`;
+  }
+
+  if (taxi.status === "error") {
+    return taxi.detail || "Taxi evidenci se nepodarilo overit.";
+  }
+
+  return "Taxi evidenci se nepodarilo jednoznacne vyhodnotit.";
+}
+
+function formatPoliceWantedValue(policeWanted) {
+  if (!policeWanted) {
+    return null;
+  }
+
+  if (policeWanted.status === "wanted") {
+    return policeWanted.detail || "V policejni evidenci je aktivni patrani.";
+  }
+
+  if (policeWanted.status === "clear") {
+    return policeWanted.sourceUpdatedAt
+      ? `Bez zaznamu v aktualizaci ${policeWanted.sourceUpdatedAt}`
+      : "Bez aktivniho zaznamu.";
+  }
+
+  return policeWanted.detail || "Policejni patrani se nepodarilo overit.";
+}
+
+function formatImportRecordValue(importRecord) {
+  if (!importRecord) {
+    return null;
+  }
+
+  if (importRecord.status === "error") {
+    return importRecord.detail || "Zaznam o dovozu se nepodarilo nacist.";
+  }
+
+  return [importRecord.country ? `stat ${importRecord.country}` : null, importRecord.importDate ? `datum ${formatDate(importRecord.importDate)}` : null]
+    .filter(Boolean)
+    .join(" · ") || "Vozidlo je evidovano jako dovezene.";
+}
+
+function formatDeregistrationValue(record) {
+  if (!record) {
+    return null;
+  }
+
+  if (record.status === "error") {
+    return record.detail || "Zaznam o vyrazeni se nepodarilo nacist.";
+  }
+
+  const parts = [
+    record.reason || record.rmName || null,
+    record.dateFrom ? `od ${formatDate(record.dateFrom)}` : null,
+    record.dateTo ? `do ${formatDate(record.dateTo)}` : record.active ? "stale aktivni" : null
+  ].filter(Boolean);
+
+  return parts.join(" · ") || "Vozidlo ma zaznam o vyrazeni z provozu.";
+}
+
+function formatInspectionAuditValue(audit) {
+  if (!audit) {
+    return null;
+  }
+
+  if (audit.status === "pending") {
+    return "Nacitani podkladovych dat probiha.";
+  }
+
+  if (audit.status !== "ready") {
+    return "Audit STK neni k dispozici.";
+  }
+
+  return [
+    audit.currentStatus || null,
+    audit.score !== null ? `score ${audit.score}/100` : null,
+    audit.lastKnownDate ? `posledni zaznam ${formatDate(audit.lastKnownDate)}` : null
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 function looksNormalized(payload) {
@@ -3400,6 +4353,8 @@ function buildUniqaLaunchOptions() {
     args.push("--start-minimized", "--window-position=-32000,-32000");
   }
 
+  args.push("--disable-blink-features=AutomationControlled");
+
   if (process.platform === "linux") {
     args.push("--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage");
   }
@@ -3450,6 +4405,7 @@ function findSuccessfulUniqaResponse(responses) {
 module.exports = {
   getLookupRuntimeStatus,
   lookupVehicle,
+  lookupVehiclesByIco,
   lookupVehicleInspections,
   describeLookupFailure
 };
