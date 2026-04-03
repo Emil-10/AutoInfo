@@ -8,6 +8,7 @@
     "dev": "node server.js",
     "frontend:dev": "vite",
     "postinstall": "node node_modules/playwright-core/cli.js install chromium",
+    "prebuild": "node scripts/build-fleet-db.js",
     "start": "node server.js"
   },
   "dependencies": {

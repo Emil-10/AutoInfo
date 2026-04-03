@@ -43,6 +43,12 @@ const POLICE_WANTED_CACHE = new Map();
 const OPEN_DATA_IMPORT_CACHE = new Map();
 const OPEN_DATA_DEREG_CACHE = new Map();
 const ICO_FLEET_CACHE = new Map();
+const FLEET_DB_DIR = path.join(OPEN_DATA_PERSIST_DIR, "fleet-db");
+const FLEET_DB_META_FILE = path.join(FLEET_DB_DIR, "meta.json");
+const FLEET_DB_OWNER_DIR = path.join(FLEET_DB_DIR, "owners");
+const FLEET_DB_VEHICLE_DIR = path.join(FLEET_DB_DIR, "vehicles");
+const FLEET_DB_OWNER_SHARD_CACHE = new Map();
+const FLEET_DB_VEHICLE_SHARD_CACHE = new Map();
 
 const MOCK_VEHICLES = [
   {
@@ -2730,6 +2736,48 @@ async function lookupVehiclesByIco(queryIco) {
     return cached;
   }
 
+  const fleetDbPayload = await lookupVehiclesByIcoFromFleetDb(ico, normalizedQuery);
+  if (fleetDbPayload) {
+    setTimedCacheValue(ICO_FLEET_CACHE, ico, fleetDbPayload);
+    return fleetDbPayload;
+  }
+
+  const fallbackPayload = await lookupVehiclesByIcoDirectScan(queryIco);
+  setTimedCacheValue(ICO_FLEET_CACHE, ico, fallbackPayload);
+  return fallbackPayload;
+}
+
+async function lookupVehiclesByIcoDirectScan(queryIco) {
+  const ico = sanitizeIco(queryIco);
+  const normalizedQuery = normalizeWhitespace(queryIco);
+
+  if (!ico) {
+    return {
+      kind: "fleet",
+      query: {
+        raw: normalizedQuery,
+        normalized: normalizedQuery,
+        type: "ico",
+        resolvedAt: new Date().toISOString()
+      },
+      company: null,
+      summary: {
+        vehicleCount: 0,
+        displayedCount: 0,
+        currentVehicleCount: 0,
+        relationshipCount: 0,
+        truncated: false,
+        sourceUpdatedAt: null
+      },
+      records: []
+    };
+  }
+
+  const cached = getTimedCacheValue(ICO_FLEET_CACHE, ico);
+  if (cached !== undefined) {
+    return cached;
+  }
+
   await ensureOpenDataPersistentCachesLoaded();
 
   const [company] = await Promise.all([
@@ -2801,6 +2849,165 @@ async function lookupVehiclesByIco(queryIco) {
 
   setTimedCacheValue(ICO_FLEET_CACHE, ico, payload);
   return payload;
+}
+
+async function lookupVehiclesByIcoFromFleetDb(ico, normalizedQuery) {
+  const meta = await readJsonFile(FLEET_DB_META_FILE);
+  if (!meta?.ready) {
+    return null;
+  }
+
+  const [relations, company] = await Promise.all([
+    readFleetDbOwnerRelations(ico),
+    fetchCompanyFromAres(ico).catch(() => null)
+  ]);
+
+  const summaryMap = await readFleetDbVehicleSummaries(relations);
+  const records = mergeFleetDbRecords(relations, summaryMap);
+
+  return {
+    kind: "fleet",
+    query: {
+      raw: normalizedQuery,
+      normalized: ico,
+      type: "ico",
+      resolvedAt: new Date().toISOString()
+    },
+    company: {
+      ico,
+      name: company?.name || firstNonEmpty(relations.map((relation) => relation.name)) || null,
+      address: company?.address || firstNonEmpty(relations.map((relation) => relation.address)) || null
+    },
+    summary: {
+      vehicleCount: records.length,
+      displayedCount: records.length,
+      currentVehicleCount: records.filter((record) => record.current).length,
+      relationshipCount: relations.length,
+      truncated: false,
+      sourceUpdatedAt: meta.ownerDatasetDate || meta.vehicleDatasetDate || null
+    },
+    records
+  };
+}
+
+async function readFleetDbOwnerRelations(ico) {
+  const shard = getFleetDbShardKey(ico);
+  const rows = await readFleetDbShard(FLEET_DB_OWNER_DIR, shard, FLEET_DB_OWNER_SHARD_CACHE);
+  return rows.filter((row) => row.ico === ico);
+}
+
+async function readFleetDbVehicleSummaries(relations) {
+  const pcvs = Array.from(new Set(relations.map((relation) => normalizeWhitespace(relation.pcv)).filter(Boolean)));
+  const groupedByShard = new Map();
+
+  pcvs.forEach((pcv) => {
+    const shard = getFleetDbShardKey(pcv);
+    if (!groupedByShard.has(shard)) {
+      groupedByShard.set(shard, []);
+    }
+    groupedByShard.get(shard).push(pcv);
+  });
+
+  const summaryMap = new Map();
+  for (const [shard, shardPcvs] of groupedByShard.entries()) {
+    const rows = await readFleetDbShard(FLEET_DB_VEHICLE_DIR, shard, FLEET_DB_VEHICLE_SHARD_CACHE);
+    const wanted = new Set(shardPcvs);
+    rows.forEach((row) => {
+      if (wanted.has(normalizeWhitespace(row.pcv))) {
+        summaryMap.set(normalizeWhitespace(row.pcv), row);
+      }
+    });
+  }
+
+  return summaryMap;
+}
+
+async function readFleetDbShard(directory, shardKey, cache) {
+  const cached = cache.get(shardKey);
+  if (cached) {
+    return cached;
+  }
+
+  const filePath = path.join(directory, `${shardKey}.jsonl`);
+  try {
+    const content = await fs.promises.readFile(filePath, "utf8");
+    const rows = content
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    cache.set(shardKey, rows);
+    return rows;
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      cache.set(shardKey, []);
+      return [];
+    }
+
+    throw error;
+  }
+}
+
+function mergeFleetDbRecords(relations, summaryMap) {
+  const groupedRecords = Array.from(
+    relations.reduce((map, relation) => {
+      const key = relation.pcv || `${relation.relation}-${relation.dateFrom}-${relation.dateTo}`;
+      const summary = relation.pcv ? summaryMap.get(normalizeWhitespace(relation.pcv)) : null;
+
+      if (!map.has(key)) {
+        const title = summary
+          ? [summary.make, summary.model, summary.type].filter(Boolean).join(" ").trim() || summary.vin || summary.pcv || `Vozidlo ${key}`
+          : relation.pcv
+            ? `Vozidlo ${relation.pcv}`
+            : "Vozidlo bez PČV";
+        map.set(key, {
+          pcv: relation.pcv || summary?.pcv || null,
+          vin: summary?.vin || null,
+          make: summary?.make || null,
+          model: summary?.model || null,
+          type: summary?.type || null,
+          category: summary?.category || null,
+          fuel: summary?.fuel || null,
+          firstRegistration: summary?.firstRegistration || null,
+          status: summary?.status || null,
+          title,
+          current: Boolean(relation.current),
+          firstSeen: relation.dateFrom || null,
+          lastSeen: relation.dateTo || null,
+          relations: []
+        });
+      }
+
+      const current = map.get(key);
+      current.current = current.current || Boolean(relation.current);
+      current.firstSeen = current.firstSeen
+        ? compareDatesDesc(current.firstSeen, relation.dateFrom) > 0
+          ? current.firstSeen
+          : relation.dateFrom || current.firstSeen
+        : relation.dateFrom || null;
+      current.lastSeen = current.lastSeen
+        ? compareDatesDesc(current.lastSeen, relation.dateTo) < 0
+          ? current.lastSeen
+          : relation.dateTo || current.lastSeen
+        : relation.dateTo || null;
+      current.relations.push(relation);
+      return map;
+    }, new Map()).values()
+  );
+
+  return groupedRecords.sort((left, right) => normalizeWhitespace(left.title).localeCompare(normalizeWhitespace(right.title), "cs"));
+}
+
+function getFleetDbShardKey(value) {
+  const normalized = String(value || "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
+
+  if (!normalized) {
+    return "__";
+  }
+
+  return normalized.slice(0, 2).padEnd(2, "_");
 }
 
 async function lookupVehiclesByIcoLegacy(queryIco) {
