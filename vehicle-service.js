@@ -11,17 +11,17 @@ const ARES_ENABLED = String(process.env.ARES_ENABLED || "true").toLowerCase() !=
 const UNIQA_LOOKUP_ENABLED = String(process.env.UNIQA_LOOKUP_ENABLED || "true").toLowerCase() !== "false";
 const UNIQA_PHONE = normalizeWhitespace(process.env.UNIQA_PHONE || "+420 700 700 700") || "+420 700 700 700";
 const UNIQA_HEADLESS = String(process.env.UNIQA_HEADLESS || (process.platform === "linux" ? "true" : "false")).toLowerCase() === "true";
-const UNIQA_BROWSER_INFO = resolveUniqaBrowserInfo();
-const UNIQA_BROWSER_PATH = UNIQA_BROWSER_INFO.path;
-const UNIQA_USER_AGENT =
-  process.env.UNIQA_USER_AGENT ||
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
 const BROWSERLESS_TOKEN = normalizeWhitespace(process.env.BROWSERLESS_TOKEN || "");
 const BROWSERLESS_WS_URL = normalizeWhitespace(process.env.BROWSERLESS_WS_URL || "");
 const BROWSERLESS_REGION = normalizeWhitespace(process.env.BROWSERLESS_REGION || "lon") || "lon";
 const BROWSERLESS_BROWSER = normalizeWhitespace(process.env.BROWSERLESS_BROWSER || "chrome") || "chrome";
 const BROWSERLESS_STEALTH = String(process.env.BROWSERLESS_STEALTH || "true").toLowerCase() !== "false";
 const BROWSERLESS_ENABLED = Boolean(BROWSERLESS_WS_URL || BROWSERLESS_TOKEN);
+const UNIQA_BROWSER_INFO = resolveUniqaBrowserInfo();
+const UNIQA_BROWSER_PATH = UNIQA_BROWSER_INFO.path;
+const UNIQA_USER_AGENT =
+  process.env.UNIQA_USER_AGENT ||
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
 const UNIQA_CACHE_TTL_MS = Math.max(0, Number(process.env.UNIQA_CACHE_TTL_MS || 900000) || 900000);
 const UNIQA_DEBUG_CAPTURE = String(process.env.UNIQA_DEBUG_CAPTURE || "false").toLowerCase() === "true";
 const UNIQA_DEBUG_TOKEN = normalizeWhitespace(process.env.UNIQA_DEBUG_TOKEN || "");
