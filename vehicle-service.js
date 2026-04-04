@@ -20,6 +20,8 @@ const UNIQA_CACHE_TTL_MS = Math.max(0, Number(process.env.UNIQA_CACHE_TTL_MS || 
 const UNIQA_DEBUG_CAPTURE = String(process.env.UNIQA_DEBUG_CAPTURE || "false").toLowerCase() === "true";
 const UNIQA_DEBUG_TOKEN = normalizeWhitespace(process.env.UNIQA_DEBUG_TOKEN || "");
 const UNIQA_DEBUG_KEEP = Math.max(1, Number(process.env.UNIQA_DEBUG_KEEP || 8) || 8);
+const UNIQA_DEBUG_POST_SUBMIT_STEPS = Math.max(1, Number(process.env.UNIQA_DEBUG_POST_SUBMIT_STEPS || 6) || 6);
+const UNIQA_DEBUG_POST_SUBMIT_INTERVAL_MS = Math.max(500, Number(process.env.UNIQA_DEBUG_POST_SUBMIT_INTERVAL_MS || 1500) || 1500);
 const UNIQA_LOOKUP_CACHE = new Map();
 const OPEN_DATA_CACHE_TTL_MS = Math.max(60000, Number(process.env.OPEN_DATA_CACHE_TTL_MS || 21600000) || 21600000);
 const OPEN_DATA_TOKEN_CACHE = { value: null, expiresAt: 0 };
@@ -773,8 +775,7 @@ async function executeUniqaBrowserLookup(lookup, attempt) {
     await page.waitForTimeout(attempt.submitDelayMs);
     await captureUniqaDebugSnapshot(page, debugSession, "02-filled");
     await page.getByRole("button", { name: "Vyhledat vozidlo" }).click();
-    await page.waitForTimeout(attempt.responseDelayMs);
-    await captureUniqaDebugSnapshot(page, debugSession, "03-after-submit");
+    await captureUniqaDebugPostSubmit(page, debugSession, attempt.responseDelayMs);
 
     const successfulResponse = findSuccessfulUniqaResponse(responses);
     if (successfulResponse) {
@@ -862,6 +863,34 @@ async function captureUniqaDebugSnapshot(page, session, label) {
     await fs.promises.writeFile(path.join(session.dir, stateName), JSON.stringify(state, null, 2), "utf8");
     session.artifacts.push({ name: stateName, kind: "application/json" });
   } catch (error) {}
+}
+
+async function captureUniqaDebugPostSubmit(page, session, totalWaitMs) {
+  if (!session || !page) {
+    if (page && totalWaitMs > 0) {
+      await page.waitForTimeout(totalWaitMs);
+    }
+    return;
+  }
+
+  let elapsed = 0;
+  for (let index = 1; index <= UNIQA_DEBUG_POST_SUBMIT_STEPS; index += 1) {
+    const remaining = totalWaitMs - elapsed;
+    if (remaining <= 0) {
+      break;
+    }
+
+    const delay = Math.min(UNIQA_DEBUG_POST_SUBMIT_INTERVAL_MS, remaining);
+    await page.waitForTimeout(delay);
+    elapsed += delay;
+    await captureUniqaDebugSnapshot(page, session, `03-after-submit-${String(index).padStart(2, "0")}`);
+  }
+
+  if (elapsed < totalWaitMs) {
+    await page.waitForTimeout(totalWaitMs - elapsed);
+  }
+
+  await captureUniqaDebugSnapshot(page, session, "04-after-submit-final");
 }
 
 async function appendUniqaDebugResponse(session, payload) {
