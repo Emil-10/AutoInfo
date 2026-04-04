@@ -16,6 +16,12 @@ const UNIQA_BROWSER_PATH = UNIQA_BROWSER_INFO.path;
 const UNIQA_USER_AGENT =
   process.env.UNIQA_USER_AGENT ||
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
+const BROWSERLESS_TOKEN = normalizeWhitespace(process.env.BROWSERLESS_TOKEN || "");
+const BROWSERLESS_WS_URL = normalizeWhitespace(process.env.BROWSERLESS_WS_URL || "");
+const BROWSERLESS_REGION = normalizeWhitespace(process.env.BROWSERLESS_REGION || "lon") || "lon";
+const BROWSERLESS_BROWSER = normalizeWhitespace(process.env.BROWSERLESS_BROWSER || "chrome") || "chrome";
+const BROWSERLESS_STEALTH = String(process.env.BROWSERLESS_STEALTH || "true").toLowerCase() !== "false";
+const BROWSERLESS_ENABLED = Boolean(BROWSERLESS_WS_URL || BROWSERLESS_TOKEN);
 const UNIQA_CACHE_TTL_MS = Math.max(0, Number(process.env.UNIQA_CACHE_TTL_MS || 900000) || 900000);
 const UNIQA_DEBUG_CAPTURE = String(process.env.UNIQA_DEBUG_CAPTURE || "false").toLowerCase() === "true";
 const UNIQA_DEBUG_TOKEN = normalizeWhitespace(process.env.UNIQA_DEBUG_TOKEN || "");
@@ -233,7 +239,7 @@ function getLookupRuntimeStatus() {
   const transportEndpoint = normalizeWhitespace(process.env.TRANSPORT_CUBE_LOOKUP_URL || "");
   const transportConfigured = Boolean(transportEndpoint);
   const officialVinApiConfigured = Boolean(process.env.DATAOVOZIDLECH_API_KEY || process.env.RSV_PUBLIC_API_KEY);
-  const uniqaBrowserConfigured = Boolean(UNIQA_BROWSER_PATH);
+  const uniqaBrowserConfigured = Boolean(BROWSERLESS_ENABLED || UNIQA_BROWSER_PATH);
   const runtime = {
     platform: process.platform,
     nodeVersion: process.version,
@@ -255,6 +261,8 @@ function getLookupRuntimeStatus() {
       browserSource: UNIQA_BROWSER_INFO.source,
       headless: UNIQA_HEADLESS,
       displayAvailable: Boolean(process.env.DISPLAY),
+      browserlessEnabled: BROWSERLESS_ENABLED,
+      browserlessRegion: BROWSERLESS_ENABLED ? BROWSERLESS_REGION : null,
       debugCaptureEnabled: UNIQA_DEBUG_CAPTURE,
       debugTokenConfigured: Boolean(UNIQA_DEBUG_TOKEN)
     },
@@ -655,7 +663,7 @@ async function lookupFromUniqaBrowser(lookup, diagnostics) {
     return null;
   }
 
-  if (!UNIQA_BROWSER_PATH) {
+  if (!BROWSERLESS_ENABLED && !UNIQA_BROWSER_PATH) {
     recordLookupAttempt(diagnostics, {
       source: "uniqa-browser",
       status: "missing_config",
@@ -719,19 +727,15 @@ async function lookupFromUniqaBrowser(lookup, diagnostics) {
 }
 
 async function executeUniqaBrowserLookup(lookup, attempt) {
-  const { chromium } = require("playwright-core");
-  const browser = await chromium.launch(buildUniqaLaunchOptions());
+  const browserSession = await createUniqaBrowserSession();
+  const { browser, page } = browserSession;
   const debugSession = await createUniqaDebugSession(lookup, attempt);
 
   try {
-    const page = await browser.newPage({
-      locale: "cs-CZ",
-      viewport: { width: 1366, height: 900 },
-      userAgent: UNIQA_USER_AGENT
-    });
     const responses = [];
 
     await applyUniqaStealth(page);
+    await configureUniqaPage(page);
 
     page.on("response", async (response) => {
       if (!response.url().includes("/rest/public/v1/calculator/motor/vehicle")) {
@@ -802,6 +806,37 @@ async function executeUniqaBrowserLookup(lookup, attempt) {
   } finally {
     await browser.close().catch(() => {});
   }
+}
+
+async function createUniqaBrowserSession() {
+  const { chromium } = require("playwright-core");
+
+  if (BROWSERLESS_ENABLED) {
+    const browser = await chromium.connectOverCDP(getBrowserlessWebSocketUrl());
+    const context =
+      browser.contexts()[0] ||
+      (typeof browser.newContext === "function"
+        ? await browser.newContext({
+            locale: "cs-CZ",
+            viewport: { width: 1366, height: 900 }
+          })
+        : null);
+
+    if (!context) {
+      throw new Error("Browserless nepripravil pouzitelny browser context.");
+    }
+
+    const page = context.pages()[0] || (await context.newPage());
+    return { browser, page };
+  }
+
+  const browser = await chromium.launch(buildUniqaLaunchOptions());
+  const page = await browser.newPage({
+    locale: "cs-CZ",
+    viewport: { width: 1366, height: 900 },
+    userAgent: UNIQA_USER_AGENT
+  });
+  return { browser, page };
 }
 
 async function createUniqaDebugSession(lookup, attempt) {
@@ -996,6 +1031,50 @@ async function applyUniqaStealth(page) {
       get: () => [1, 2, 3, 4]
     });
   });
+}
+
+async function configureUniqaPage(page) {
+  if (!page) {
+    return;
+  }
+
+  try {
+    await page.setViewportSize({ width: 1366, height: 900 });
+  } catch (error) {}
+
+  try {
+    await page.setExtraHTTPHeaders({
+      "Accept-Language": "cs-CZ,cs;q=0.9,en-US;q=0.8,en;q=0.7"
+    });
+  } catch (error) {}
+
+  try {
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Network.setUserAgentOverride", {
+      userAgent: UNIQA_USER_AGENT,
+      acceptLanguage: "cs-CZ,cs;q=0.9,en-US;q=0.8,en;q=0.7",
+      platform: "Windows"
+    });
+  } catch (error) {}
+}
+
+function getBrowserlessWebSocketUrl() {
+  if (BROWSERLESS_WS_URL) {
+    return BROWSERLESS_WS_URL;
+  }
+
+  if (!BROWSERLESS_TOKEN) {
+    throw new Error("Chybi BROWSERLESS_TOKEN nebo BROWSERLESS_WS_URL.");
+  }
+
+  const pathSuffix =
+    BROWSERLESS_BROWSER === "chrome"
+      ? BROWSERLESS_STEALTH
+        ? "/chrome/stealth"
+        : "/chrome"
+      : "";
+
+  return `wss://production-${BROWSERLESS_REGION}.browserless.io${pathSuffix}?token=${encodeURIComponent(BROWSERLESS_TOKEN)}`;
 }
 
 function normalizeUniqaPayload(payload, lookup) {
@@ -4722,6 +4801,13 @@ function joinUniqueText(values, separator) {
 }
 
 function resolveUniqaBrowserInfo() {
+  if (BROWSERLESS_ENABLED) {
+    return {
+      path: null,
+      source: "browserless"
+    };
+  }
+
   const explicitPath = normalizeWhitespace(process.env.UNIQA_BROWSER_PATH || "");
   if (explicitPath) {
     return {
