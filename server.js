@@ -45,16 +45,6 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    if (requestUrl.pathname === "/api/debug/uniqa/latest") {
-      await handleUniqaDebugLatest(requestUrl, res);
-      return;
-    }
-
-    if (requestUrl.pathname === "/api/debug/uniqa/file") {
-      await handleUniqaDebugFile(requestUrl, res);
-      return;
-    }
-
     if (requestUrl.pathname === "/api/health") {
       const runtimeStatus = safeGetLookupRuntimeStatus();
       sendJson(res, 200, {
@@ -183,16 +173,6 @@ async function serveStatic(requestPath, res) {
   }
 }
 
-async function sendFile(res, filePath) {
-  const content = await fs.promises.readFile(filePath);
-  const extension = path.extname(filePath).toLowerCase();
-  res.writeHead(200, {
-    "Content-Type": MIME_TYPES[extension] || "application/octet-stream",
-    "Cache-Control": "no-store"
-  });
-  res.end(content);
-}
-
 function sendJson(res, statusCode, payload) {
   res.writeHead(statusCode, {
     "Content-Type": "application/json; charset=utf-8",
@@ -269,62 +249,6 @@ async function handleCompanyFleetLookup(requestUrl, res) {
     sendJson(res, 502, {
       message: "Nepodarilo se nacist seznam vozidel pro zadane ICO.",
       detail: error.message
-    });
-  }
-}
-
-async function handleUniqaDebugLatest(requestUrl, res) {
-  const token = (requestUrl.searchParams.get("token") || "").trim();
-
-  try {
-    const { readLatestUniqaDebug } = getVehicleService();
-    const payload = await readLatestUniqaDebug(token);
-
-    if (!payload) {
-      sendJson(res, 404, {
-        message: "Zatim nebyl ulozen zadny UNIQA debug artifact."
-      });
-      return;
-    }
-
-    const files = Array.isArray(payload.artifacts)
-      ? payload.artifacts.map((artifact) => ({
-          ...artifact,
-          url: `/api/debug/uniqa/file?token=${encodeURIComponent(token)}&id=${encodeURIComponent(payload.id)}&name=${encodeURIComponent(artifact.name)}`
-        }))
-      : [];
-
-    sendJson(res, 200, {
-      ...payload,
-      artifacts: files
-    });
-  } catch (error) {
-    sendJson(res, error.code === "FORBIDDEN" ? 403 : 500, {
-      message: error.message
-    });
-  }
-}
-
-async function handleUniqaDebugFile(requestUrl, res) {
-  const token = (requestUrl.searchParams.get("token") || "").trim();
-  const id = (requestUrl.searchParams.get("id") || "").trim();
-  const name = (requestUrl.searchParams.get("name") || "").trim();
-
-  try {
-    const { resolveUniqaDebugArtifact } = getVehicleService();
-    const filePath = await resolveUniqaDebugArtifact(token, id, name);
-
-    if (!filePath) {
-      sendJson(res, 404, {
-        message: "Pozadovany UNIQA debug artifact nebyl nalezen."
-      });
-      return;
-    }
-
-    await sendFile(res, filePath);
-  } catch (error) {
-    sendJson(res, error.code === "FORBIDDEN" ? 403 : 500, {
-      message: error.message
     });
   }
 }
