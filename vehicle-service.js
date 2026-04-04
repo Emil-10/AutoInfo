@@ -17,6 +17,9 @@ const UNIQA_USER_AGENT =
   process.env.UNIQA_USER_AGENT ||
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
 const UNIQA_CACHE_TTL_MS = Math.max(0, Number(process.env.UNIQA_CACHE_TTL_MS || 900000) || 900000);
+const UNIQA_DEBUG_CAPTURE = String(process.env.UNIQA_DEBUG_CAPTURE || "false").toLowerCase() === "true";
+const UNIQA_DEBUG_TOKEN = normalizeWhitespace(process.env.UNIQA_DEBUG_TOKEN || "");
+const UNIQA_DEBUG_KEEP = Math.max(1, Number(process.env.UNIQA_DEBUG_KEEP || 8) || 8);
 const UNIQA_LOOKUP_CACHE = new Map();
 const OPEN_DATA_CACHE_TTL_MS = Math.max(60000, Number(process.env.OPEN_DATA_CACHE_TTL_MS || 21600000) || 21600000);
 const OPEN_DATA_TOKEN_CACHE = { value: null, expiresAt: 0 };
@@ -49,6 +52,8 @@ const FLEET_DB_OWNER_DIR = path.join(FLEET_DB_DIR, "owners");
 const FLEET_DB_VEHICLE_DIR = path.join(FLEET_DB_DIR, "vehicles");
 const FLEET_DB_OWNER_SHARD_CACHE = new Map();
 const FLEET_DB_VEHICLE_SHARD_CACHE = new Map();
+const UNIQA_DEBUG_DIR = path.join(__dirname, ".cache", "uniqa-debug");
+const UNIQA_DEBUG_LATEST_FILE = path.join(UNIQA_DEBUG_DIR, "latest.json");
 
 const MOCK_VEHICLES = [
   {
@@ -247,7 +252,9 @@ function getLookupRuntimeStatus() {
       browserConfigured: uniqaBrowserConfigured,
       browserSource: UNIQA_BROWSER_INFO.source,
       headless: UNIQA_HEADLESS,
-      displayAvailable: Boolean(process.env.DISPLAY)
+      displayAvailable: Boolean(process.env.DISPLAY),
+      debugCaptureEnabled: UNIQA_DEBUG_CAPTURE,
+      debugTokenConfigured: Boolean(UNIQA_DEBUG_TOKEN)
     },
     warnings: []
   };
@@ -712,6 +719,7 @@ async function lookupFromUniqaBrowser(lookup, diagnostics) {
 async function executeUniqaBrowserLookup(lookup, attempt) {
   const { chromium } = require("playwright-core");
   const browser = await chromium.launch(buildUniqaLaunchOptions());
+  const debugSession = await createUniqaDebugSession(lookup, attempt);
 
   try {
     const page = await browser.newPage({
@@ -729,7 +737,9 @@ async function executeUniqaBrowserLookup(lookup, attempt) {
       }
 
       try {
-        responses.push(JSON.parse(await response.text()));
+        const payload = JSON.parse(await response.text());
+        responses.push(payload);
+        await appendUniqaDebugResponse(debugSession, payload);
       } catch (error) {
         responses.push(null);
       }
@@ -740,6 +750,7 @@ async function executeUniqaBrowserLookup(lookup, attempt) {
       timeout: 60000
     });
     await page.waitForTimeout(attempt.initialDelayMs);
+    await captureUniqaDebugSnapshot(page, debugSession, "01-loaded");
 
     const acceptCookiesButton = page.getByRole("button", { name: "Akceptovat vše" });
     if (await acceptCookiesButton.count()) {
@@ -760,18 +771,188 @@ async function executeUniqaBrowserLookup(lookup, attempt) {
     await page.keyboard.press("Control+A");
     await page.keyboard.type(UNIQA_PHONE, { delay: attempt.typeDelayMs });
     await page.waitForTimeout(attempt.submitDelayMs);
+    await captureUniqaDebugSnapshot(page, debugSession, "02-filled");
     await page.getByRole("button", { name: "Vyhledat vozidlo" }).click();
     await page.waitForTimeout(attempt.responseDelayMs);
+    await captureUniqaDebugSnapshot(page, debugSession, "03-after-submit");
 
     const successfulResponse = findSuccessfulUniqaResponse(responses);
     if (successfulResponse) {
+      await finalizeUniqaDebugSession(debugSession, "success", {
+        responseCount: responses.length
+      });
       return successfulResponse;
     }
 
+    await finalizeUniqaDebugSession(debugSession, "miss", {
+      responseCount: responses.length,
+      lastResponse: responses.length > 0 ? responses[responses.length - 1] : null
+    });
     return null;
+  } catch (error) {
+    if (debugSession) {
+      await finalizeUniqaDebugSession(debugSession, "error", {
+        error: formatLookupError(error)
+      }).catch(() => {});
+      error.uniqaDebugId = debugSession.id;
+      error.message = `${error.message} [debugId:${debugSession.id}]`;
+    }
+    throw error;
   } finally {
     await browser.close().catch(() => {});
   }
+}
+
+async function createUniqaDebugSession(lookup, attempt) {
+  if (!UNIQA_DEBUG_CAPTURE) {
+    return null;
+  }
+
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const dir = path.join(UNIQA_DEBUG_DIR, id);
+  await fs.promises.mkdir(dir, { recursive: true });
+
+  return {
+    id,
+    dir,
+    createdAt: new Date().toISOString(),
+    lookup: {
+      compact: lookup?.compact || null,
+      type: lookup?.type || null
+    },
+    attempt,
+    artifacts: [],
+    responses: []
+  };
+}
+
+async function captureUniqaDebugSnapshot(page, session, label) {
+  if (!session || !page) {
+    return;
+  }
+
+  const safeLabel = label.toLowerCase().replace(/[^a-z0-9_-]/g, "-");
+  const screenshotName = `${safeLabel}.jpg`;
+  const htmlName = `${safeLabel}.html`;
+  const stateName = `${safeLabel}.json`;
+
+  try {
+    await page.screenshot({
+      path: path.join(session.dir, screenshotName),
+      type: "jpeg",
+      quality: 80,
+      fullPage: true
+    });
+    session.artifacts.push({ name: screenshotName, kind: "image/jpeg" });
+  } catch (error) {}
+
+  try {
+    const html = await page.content();
+    await fs.promises.writeFile(path.join(session.dir, htmlName), html, "utf8");
+    session.artifacts.push({ name: htmlName, kind: "text/html" });
+  } catch (error) {}
+
+  try {
+    const state = {
+      label,
+      capturedAt: new Date().toISOString(),
+      url: page.url(),
+      title: await page.title().catch(() => null)
+    };
+    await fs.promises.writeFile(path.join(session.dir, stateName), JSON.stringify(state, null, 2), "utf8");
+    session.artifacts.push({ name: stateName, kind: "application/json" });
+  } catch (error) {}
+}
+
+async function appendUniqaDebugResponse(session, payload) {
+  if (!session) {
+    return;
+  }
+
+  session.responses.push(payload);
+  if (session.responses.length > 6) {
+    session.responses = session.responses.slice(-6);
+  }
+}
+
+async function finalizeUniqaDebugSession(session, status, extra) {
+  if (!session) {
+    return null;
+  }
+
+  const metadata = {
+    id: session.id,
+    createdAt: session.createdAt,
+    finishedAt: new Date().toISOString(),
+    status,
+    lookup: session.lookup,
+    attempt: session.attempt,
+    artifacts: session.artifacts,
+    responses: session.responses,
+    ...extra
+  };
+
+  await fs.promises.writeFile(path.join(session.dir, "meta.json"), JSON.stringify(metadata, null, 2), "utf8");
+  await fs.promises.mkdir(UNIQA_DEBUG_DIR, { recursive: true });
+  await fs.promises.writeFile(UNIQA_DEBUG_LATEST_FILE, JSON.stringify(metadata, null, 2), "utf8");
+  await pruneUniqaDebugSessions();
+  return metadata;
+}
+
+async function pruneUniqaDebugSessions() {
+  if (!UNIQA_DEBUG_CAPTURE) {
+    return;
+  }
+
+  const entries = await fs.promises.readdir(UNIQA_DEBUG_DIR, { withFileTypes: true }).catch(() => []);
+  const directories = await Promise.all(
+    entries
+      .filter((entry) => entry.isDirectory())
+      .map(async (entry) => {
+        const fullPath = path.join(UNIQA_DEBUG_DIR, entry.name);
+        const stat = await fs.promises.stat(fullPath).catch(() => null);
+        return stat ? { fullPath, mtimeMs: stat.mtimeMs } : null;
+      })
+  );
+
+  const stale = directories
+    .filter(Boolean)
+    .sort((left, right) => right.mtimeMs - left.mtimeMs)
+    .slice(UNIQA_DEBUG_KEEP);
+
+  await Promise.all(stale.map((entry) => fs.promises.rm(entry.fullPath, { recursive: true, force: true })));
+}
+
+function assertUniqaDebugAccess(token) {
+  if (!UNIQA_DEBUG_CAPTURE || !UNIQA_DEBUG_TOKEN || token !== UNIQA_DEBUG_TOKEN) {
+    const error = new Error("Pristup k UNIQA debug artifactum byl odmitnut.");
+    error.code = "FORBIDDEN";
+    throw error;
+  }
+}
+
+async function readLatestUniqaDebug(token) {
+  assertUniqaDebugAccess(token);
+  return await readJsonFile(UNIQA_DEBUG_LATEST_FILE);
+}
+
+async function resolveUniqaDebugArtifact(token, id, name) {
+  assertUniqaDebugAccess(token);
+
+  const safeId = String(id || "").replace(/[^a-zA-Z0-9_-]/g, "");
+  const safeName = path.basename(String(name || ""));
+  if (!safeId || !safeName) {
+    return null;
+  }
+
+  const candidatePath = path.normalize(path.join(UNIQA_DEBUG_DIR, safeId, safeName));
+  const allowedRoot = path.normalize(path.join(UNIQA_DEBUG_DIR, safeId));
+  if (!candidatePath.startsWith(allowedRoot)) {
+    return null;
+  }
+
+  const stat = await fs.promises.stat(candidatePath).catch(() => null);
+  return stat && stat.isFile() ? candidatePath : null;
 }
 
 async function applyUniqaStealth(page) {
@@ -4614,5 +4795,7 @@ module.exports = {
   lookupVehicle,
   lookupVehiclesByIco,
   lookupVehicleInspections,
-  describeLookupFailure
+  describeLookupFailure,
+  readLatestUniqaDebug,
+  resolveUniqaDebugArtifact
 };
