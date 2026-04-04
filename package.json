@@ -5,10 +5,10 @@
   "description": "Moderni stranka pro vyhledani vozidla podle SPZ nebo VIN.",
   "scripts": {
     "build": "vite build",
+    "build:fleet-db": "node scripts/build-fleet-db.js",
     "dev": "node server.js",
     "frontend:dev": "vite",
     "postinstall": "node node_modules/playwright-core/cli.js install chromium",
-    "prebuild": "node scripts/build-fleet-db.js",
     "start": "node server.js"
   },
   "dependencies": {
