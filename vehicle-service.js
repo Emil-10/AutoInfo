@@ -29,6 +29,15 @@ const UNIQA_DEBUG_KEEP = Math.max(1, Number(process.env.UNIQA_DEBUG_KEEP || 8) |
 const UNIQA_DEBUG_POST_SUBMIT_STEPS = Math.max(1, Number(process.env.UNIQA_DEBUG_POST_SUBMIT_STEPS || 6) || 6);
 const UNIQA_DEBUG_POST_SUBMIT_INTERVAL_MS = Math.max(500, Number(process.env.UNIQA_DEBUG_POST_SUBMIT_INTERVAL_MS || 1500) || 1500);
 const UNIQA_LOOKUP_CACHE = new Map();
+const PVZP_LOOKUP_ENABLED = String(process.env.PVZP_LOOKUP_ENABLED || process.env.UNIQA_LOOKUP_ENABLED || "true").toLowerCase() !== "false";
+const PVZP_HEADLESS = String(process.env.PVZP_HEADLESS || process.env.UNIQA_HEADLESS || (process.platform === "linux" ? "true" : "false")).toLowerCase() === "true";
+const PVZP_BROWSER_INFO = resolvePvzpBrowserInfo();
+const PVZP_BROWSER_PATH = PVZP_BROWSER_INFO.path;
+const PVZP_USER_AGENT =
+  process.env.PVZP_USER_AGENT ||
+  process.env.UNIQA_USER_AGENT ||
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
+const PVZP_LOOKUP_CACHE = new Map();
 const OPEN_DATA_CACHE_TTL_MS = Math.max(60000, Number(process.env.OPEN_DATA_CACHE_TTL_MS || 21600000) || 21600000);
 const OPEN_DATA_TOKEN_CACHE = { value: null, expiresAt: 0 };
 const OPEN_DATA_PCV_CACHE = new Map();
@@ -239,7 +248,7 @@ function getLookupRuntimeStatus() {
   const transportEndpoint = normalizeWhitespace(process.env.TRANSPORT_CUBE_LOOKUP_URL || "");
   const transportConfigured = Boolean(transportEndpoint);
   const officialVinApiConfigured = Boolean(process.env.DATAOVOZIDLECH_API_KEY || process.env.RSV_PUBLIC_API_KEY);
-  const uniqaBrowserConfigured = Boolean(BROWSERLESS_ENABLED || UNIQA_BROWSER_PATH);
+  const plateBrowserConfigured = Boolean(PVZP_BROWSER_PATH);
   const runtime = {
     platform: process.platform,
     nodeVersion: process.version,
@@ -255,14 +264,12 @@ function getLookupRuntimeStatus() {
     officialVinApi: {
       configured: officialVinApiConfigured
     },
-    uniqaFallback: {
-      enabled: UNIQA_LOOKUP_ENABLED,
-      browserConfigured: uniqaBrowserConfigured,
-      browserSource: UNIQA_BROWSER_INFO.source,
-      headless: UNIQA_HEADLESS,
+    plateFallback: {
+      enabled: PVZP_LOOKUP_ENABLED,
+      browserConfigured: plateBrowserConfigured,
+      browserSource: PVZP_BROWSER_INFO.source,
+      headless: PVZP_HEADLESS,
       displayAvailable: Boolean(process.env.DISPLAY),
-      browserlessEnabled: BROWSERLESS_ENABLED,
-      browserlessRegion: BROWSERLESS_ENABLED ? BROWSERLESS_REGION : null,
       debugCaptureEnabled: UNIQA_DEBUG_CAPTURE,
       debugTokenConfigured: Boolean(UNIQA_DEBUG_TOKEN)
     },
@@ -277,21 +284,21 @@ function getLookupRuntimeStatus() {
     runtime.warnings.push("Chybi DATAOVOZIDLECH_API_KEY nebo RSV_PUBLIC_API_KEY; oficialni VIN API neni nakonfigurovane.");
   }
 
-  if (runtime.uniqaFallback.enabled && !runtime.uniqaFallback.browserConfigured) {
-    runtime.warnings.push("UNIQA fallback nema dostupny browser binary.");
+  if (runtime.plateFallback.enabled && !runtime.plateFallback.browserConfigured) {
+    runtime.warnings.push("PVZP fallback nema dostupny browser binary.");
   }
 
-  if (runtime.uniqaFallback.browserSource === "env-missing") {
-    runtime.warnings.push("UNIQA_BROWSER_PATH je nastaveny, ale soubor na disku neexistuje.");
+  if (runtime.plateFallback.browserSource === "env-missing") {
+    runtime.warnings.push("PVZP_BROWSER_PATH je nastaveny, ale soubor na disku neexistuje.");
   }
 
-  if (runtime.uniqaFallback.enabled && runtime.platform === "linux" && runtime.uniqaFallback.headless) {
-    runtime.warnings.push("UNIQA fallback bezi v headless stealth rezimu. Pri zmene anti-bot ochrany muze byt potreba doladeni.");
+  if (runtime.plateFallback.enabled && runtime.platform === "linux" && runtime.plateFallback.headless) {
+    runtime.warnings.push("PVZP fallback bezi v headless rezimu. Pri zmene anti-bot ochrany muze byt potreba doladeni.");
   }
 
-  if (runtime.uniqaFallback.enabled && !runtime.uniqaFallback.headless && runtime.platform === "linux" && !runtime.uniqaFallback.displayAvailable) {
+  if (runtime.plateFallback.enabled && !runtime.plateFallback.headless && runtime.platform === "linux" && !runtime.plateFallback.displayAvailable) {
     runtime.warnings.push(
-      "UNIQA fallback v headed rezimu na Linuxu potrebuje DISPLAY. Na Railway aplikaci spoustejte pres Xvfb."
+      "PVZP fallback v headed rezimu na Linuxu potrebuje DISPLAY. Na Railway aplikaci spoustejte pres Xvfb."
     );
   }
 
@@ -325,6 +332,7 @@ function formatLookupSource(source) {
     "transport-cube": "Transport provider",
     "official-vin-api": "Verejne VIN API",
     "uniqa-browser": "UNIQA fallback",
+    "pvzp-browser": "PVZP fallback",
     "hlidac-statu": "Hlidac statu",
     demo: "Demo dataset"
   };
@@ -375,15 +383,16 @@ async function lookupVehicle(query, options = {}) {
   const lookup = parseLookupQuery(query);
   const diagnostics = createLookupDiagnostics(lookup);
   const liveRecord = await lookupFromConfiguredProvider(lookup, diagnostics);
-  const publicVinRecord = liveRecord ? null : await lookupFromOfficialVinApi(lookup, diagnostics);
-  const uniqaRecord = liveRecord || publicVinRecord ? null : await lookupFromUniqaBrowser(lookup, diagnostics);
+  const pvzpRecord = liveRecord ? null : await lookupFromPvzpBrowser(lookup, diagnostics);
+  const officialVinLookup = resolveSupplementalVinLookup(lookup, liveRecord || pvzpRecord);
+  const publicVinRecord = liveRecord ? null : await lookupFromOfficialVinApi(officialVinLookup || lookup, diagnostics);
   let ownershipRecord = null;
-  const mockRecord = liveRecord || publicVinRecord || uniqaRecord ? null : findMockVehicle(lookup);
-  const baseSeed = liveRecord || publicVinRecord || uniqaRecord || mockRecord;
-  const baseRecord = mergeSupplementalRecord(baseSeed, uniqaRecord);
+  const mockRecord = liveRecord || publicVinRecord || pvzpRecord ? null : findMockVehicle(lookup);
+  const baseSeed = liveRecord || publicVinRecord || pvzpRecord || mockRecord;
+  const baseRecord = mergeSupplementalRecord(baseSeed, pvzpRecord);
   const ownershipLookup = resolveOwnershipLookup(lookup, baseRecord);
 
-  if (!liveRecord && !publicVinRecord && !uniqaRecord) {
+  if (!liveRecord && !publicVinRecord && !pvzpRecord) {
     recordLookupAttempt(diagnostics, {
       source: "demo",
       status: mockRecord ? "success" : ENABLE_MOCK_DATA ? "miss" : "skipped",
@@ -446,7 +455,7 @@ function describeLookupFailure(query, diagnostics) {
   const hints = [];
 
   if (lookup.type === "vin" && !liveConfigured) {
-    hints.push("Tento VIN neni v lokalnim demo datasetu. Realna data ted zavisi na UNIQA fallbacku nebo externim provideru.");
+    hints.push("Tento VIN neni v lokalnim demo datasetu. Realna data ted zavisi na PVZP fallbacku nebo externim provideru.");
   }
 
   if (lookup.type === "vin" && !process.env.DATAOVOZIDLECH_API_KEY && !process.env.RSV_PUBLIC_API_KEY) {
@@ -649,65 +658,65 @@ async function lookupFromOfficialVinApi(lookup, diagnostics) {
   }
 }
 
-async function lookupFromUniqaBrowser(lookup, diagnostics) {
+async function lookupFromPvzpBrowser(lookup, diagnostics) {
   if (!["vin", "plate"].includes(lookup.type)) {
     return null;
   }
 
-  if (!UNIQA_LOOKUP_ENABLED) {
+  if (!PVZP_LOOKUP_ENABLED) {
     recordLookupAttempt(diagnostics, {
-      source: "uniqa-browser",
+      source: "pvzp-browser",
       status: "skipped",
-      detail: "UNIQA fallback je vypnuty."
+      detail: "PVZP fallback je vypnuty."
     });
     return null;
   }
 
-  if (!BROWSERLESS_ENABLED && !UNIQA_BROWSER_PATH) {
+  if (!PVZP_BROWSER_PATH) {
     recordLookupAttempt(diagnostics, {
-      source: "uniqa-browser",
+      source: "pvzp-browser",
       status: "missing_config",
-      detail: "Nebyl nalezen browser pro UNIQA fallback. Overte, ze pri deployi probehl postinstall stahujici Chromium."
+      detail: "Nebyl nalezen browser pro PVZP fallback. Overte, ze pri deployi probehl postinstall stahujici Chromium."
     });
     return null;
   }
 
-  if (process.platform === "linux" && !UNIQA_HEADLESS && !process.env.DISPLAY) {
+  if (process.platform === "linux" && !PVZP_HEADLESS && !process.env.DISPLAY) {
     recordLookupAttempt(diagnostics, {
-      source: "uniqa-browser",
+      source: "pvzp-browser",
       status: "missing_config",
-      detail: "Na Linuxu chybi DISPLAY pro headed UNIQA fallback. Spousteni musi bezet pres Xvfb."
+      detail: "Na Linuxu chybi DISPLAY pro headed PVZP fallback. Spousteni musi bezet pres Xvfb."
     });
     return null;
   }
 
-  const cached = getCachedUniqaRecord(lookup.compact);
+  const cached = getCachedPvzpRecord(lookup.compact);
   if (cached) {
     recordLookupAttempt(diagnostics, {
-      source: "uniqa-browser",
+      source: "pvzp-browser",
       status: "success",
-      detail: "Pouzita byla cache UNIQA fallbacku."
+      detail: "Pouzita byla cache PVZP fallbacku."
     });
     return clone(cached);
   }
 
   const attempts = [
-    { initialDelayMs: 2500, typeDelayMs: 120, submitDelayMs: 2500, responseDelayMs: 7000 },
-    { initialDelayMs: 3500, typeDelayMs: 180, submitDelayMs: 3500, responseDelayMs: 9000 }
+    { initialDelayMs: 2500, typeDelayMs: 120, responseDelayMs: 7000 },
+    { initialDelayMs: 3500, typeDelayMs: 180, responseDelayMs: 9000 }
   ];
 
   let lastError = null;
   for (const attempt of attempts) {
     try {
-      const response = await executeUniqaBrowserLookup(lookup, attempt);
-      const record = normalizeUniqaPayload(response, lookup);
+      const response = await executePvzpBrowserLookup(lookup, attempt);
+      const record = normalizePvzpPayload(response, lookup);
 
       if (record) {
-        setCachedUniqaRecord(lookup.compact, record);
+        setCachedPvzpRecord(lookup.compact, record);
         recordLookupAttempt(diagnostics, {
-          source: "uniqa-browser",
+          source: "pvzp-browser",
           status: "success",
-          detail: "UNIQA fallback vratil pouzitelna data."
+          detail: "PVZP fallback vratil pouzitelna data."
         });
         return clone(record);
       }
@@ -718,9 +727,9 @@ async function lookupFromUniqaBrowser(lookup, diagnostics) {
   }
 
   recordLookupAttempt(diagnostics, {
-    source: "uniqa-browser",
+    source: "pvzp-browser",
     status: lastError ? "error" : "miss",
-    detail: lastError ? formatLookupError(lastError) : "UNIQA fallback nevratil zadna data."
+    detail: lastError ? formatLookupError(lastError) : "PVZP fallback nevratil zadna data."
   });
 
   return null;
@@ -985,6 +994,150 @@ async function pruneUniqaDebugSessions() {
     .slice(UNIQA_DEBUG_KEEP);
 
   await Promise.all(stale.map((entry) => fs.promises.rm(entry.fullPath, { recursive: true, force: true })));
+}
+
+function resolveSupplementalVinLookup(originalLookup, record) {
+  if (originalLookup.type === "vin") {
+    return originalLookup;
+  }
+
+  const resolvedVin = extractIdentifier(record, "VIN");
+  if (!resolvedVin) {
+    return null;
+  }
+
+  const vinLookup = parseLookupQuery(resolvedVin);
+  return vinLookup.type === "vin" ? vinLookup : null;
+}
+
+async function executePvzpBrowserLookup(lookup, attempt) {
+  const browserSession = await createPvzpBrowserSession();
+  const { browser, page } = browserSession;
+  const debugSession = await createUniqaDebugSession(lookup, attempt);
+
+  try {
+    await applyUniqaStealth(page);
+    await configurePvzpPage(page);
+
+    await page.goto("https://online.pvzp.cz/clfe/motor/#/policy", {
+      waitUntil: "domcontentloaded",
+      timeout: 60000
+    });
+    await page.waitForTimeout(attempt.initialDelayMs);
+    await captureUniqaDebugSnapshot(page, debugSession, "01-loaded");
+
+    await page.locator('input[formcontrolname="registrationPlateNumber"]').fill(lookup.compact);
+    await page.waitForTimeout(Math.max(600, attempt.typeDelayMs));
+    await captureUniqaDebugSnapshot(page, debugSession, "02-filled");
+    await page.locator('input[type="button"][value="Doplnit údaje o vozidle"]').click({ force: true });
+    await captureUniqaDebugPostSubmit(page, debugSession, attempt.responseDelayMs);
+
+    const payload = await extractPvzpVehicleData(page, lookup);
+    if (payload) {
+      await appendUniqaDebugResponse(debugSession, payload);
+      await finalizeUniqaDebugSession(debugSession, "success", {
+        responseCount: 1
+      });
+      return payload;
+    }
+
+    await finalizeUniqaDebugSession(debugSession, "miss", {
+      responseCount: 0,
+      note: "PVZP po doplneni udaju nevratilo pouzitelny VIN."
+    });
+    return null;
+  } catch (error) {
+    if (debugSession) {
+      await finalizeUniqaDebugSession(debugSession, "error", {
+        error: formatLookupError(error)
+      }).catch(() => {});
+      error.uniqaDebugId = debugSession.id;
+      error.message = `${error.message} [debugId:${debugSession.id}]`;
+    }
+    throw error;
+  } finally {
+    await browser.close().catch(() => {});
+  }
+}
+
+async function createPvzpBrowserSession() {
+  const { chromium } = require("playwright-core");
+  const browser = await chromium.launch({
+    executablePath: PVZP_BROWSER_PATH || undefined,
+    headless: PVZP_HEADLESS,
+    args: buildPvzpLaunchOptions()
+  });
+  const page = await browser.newPage({
+    locale: "cs-CZ",
+    viewport: { width: 1440, height: 1200 },
+    userAgent: PVZP_USER_AGENT
+  });
+  return { browser, page };
+}
+
+async function configurePvzpPage(page) {
+  if (!page) {
+    return;
+  }
+
+  try {
+    await page.setViewportSize({ width: 1440, height: 1200 });
+  } catch (error) {}
+
+  try {
+    await page.setExtraHTTPHeaders({
+      "Accept-Language": "cs-CZ,cs;q=0.9,en-US;q=0.8,en;q=0.7"
+    });
+  } catch (error) {}
+
+  try {
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Network.setUserAgentOverride", {
+      userAgent: PVZP_USER_AGENT,
+      acceptLanguage: "cs-CZ,cs;q=0.9,en-US;q=0.8,en;q=0.7",
+      platform: "Windows"
+    });
+  } catch (error) {}
+}
+
+async function extractPvzpVehicleData(page, lookup) {
+  const result = await page.evaluate(() => {
+    const valueOf = (selector) => document.querySelector(selector)?.value?.trim() || null;
+    const selectedText = (selector) => {
+      const el = document.querySelector(selector);
+      if (!el || el.tagName !== "SELECT") {
+        return null;
+      }
+      return el.options[el.selectedIndex]?.text?.trim() || null;
+    };
+
+    return {
+      registrationPlateNumber: valueOf('input[formcontrolname="registrationPlateNumber"]'),
+      vin: valueOf('input[formcontrolname="vin"]'),
+      vehicleType: selectedText('select[formcontrolname="vehicleType"]'),
+      usage: selectedText('select[formcontrolname="vehicleUsage"]')
+    };
+  });
+
+  return result?.vin ? result : null;
+}
+
+function normalizePvzpPayload(payload, lookup) {
+  if (!payload?.vin) {
+    return null;
+  }
+
+  return normalizeGenericPayload(
+    {
+      plateNumber: payload.registrationPlateNumber || (lookup.type === "plate" ? lookup.compact : null),
+      vin: payload.vin,
+      category: payload.vehicleType,
+      status: "Doplnene z PVZP"
+    },
+    lookup,
+    "PVZP kalkulacka",
+    "Reverzni SPZ/VIN doplneni bylo nacteno z kalkulacky PVZP."
+  );
 }
 
 function assertUniqaDebugAccess(token) {
@@ -2217,6 +2370,63 @@ async function attachInspectionState(record, options = {}) {
 
   nextRecord.inspectionLookup = buildInspectionLookupState("unavailable", null, null, null);
   return nextRecord;
+}
+
+function resolvePvzpBrowserInfo() {
+  const explicitPath = normalizeWhitespace(process.env.PVZP_BROWSER_PATH || "");
+  if (explicitPath) {
+    return {
+      path: fs.existsSync(explicitPath) ? explicitPath : null,
+      source: fs.existsSync(explicitPath) ? "env" : "env-missing"
+    };
+  }
+
+  const systemBrowserPath = detectSystemBrowserPath();
+  if (systemBrowserPath) {
+    return { path: systemBrowserPath, source: "system" };
+  }
+
+  const playwrightBrowserPath = detectPlaywrightBrowserPath();
+  if (playwrightBrowserPath) {
+    return { path: playwrightBrowserPath, source: "playwright" };
+  }
+
+  return { path: null, source: null };
+}
+
+function buildPvzpLaunchOptions() {
+  const args = ["--window-size=1440,1200", "--disable-blink-features=AutomationControlled"];
+
+  if (process.platform === "win32") {
+    args.push("--start-minimized", "--window-position=-32000,-32000");
+  }
+
+  if (process.platform === "linux") {
+    args.push("--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage");
+  }
+
+  return args;
+}
+
+function getCachedPvzpRecord(key) {
+  const cached = PVZP_LOOKUP_CACHE.get(key);
+  if (!cached) {
+    return null;
+  }
+
+  if (cached.expiresAt <= Date.now()) {
+    PVZP_LOOKUP_CACHE.delete(key);
+    return null;
+  }
+
+  return cached.record;
+}
+
+function setCachedPvzpRecord(key, record) {
+  PVZP_LOOKUP_CACHE.set(key, {
+    record: clone(record),
+    expiresAt: Date.now() + Math.max(0, Number(process.env.PVZP_CACHE_TTL_MS || process.env.UNIQA_CACHE_TTL_MS || 900000) || 900000)
+  });
 }
 
 async function attachPublicRegistryState(record) {

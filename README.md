@@ -58,7 +58,7 @@ Pokud vas provider vraci uz normalizovanou strukturu s `hero`, `sections` a `own
 - `GET /api/health` ted vraci i bezpecny souhrn lookup konfigurace bez secretu.
 - Pri neuspesnem `/api/lookup` se do odpovedi i logu vypise, jestli chybi `TRANSPORT_CUBE_LOOKUP_URL`, `DATAOVOZIDLECH_API_KEY`, nebo selhalo volani provideru.
 - Startup log ted obsahuje radek `[startup] lookup runtime ...`, ktery hned po deployi ukaze, co je na serveru skutecne nakonfigurovano.
-- Na Railway nema smysl nastavovat `UNIQA_BROWSER_PATH`; fallback v realnem desktop browseru je urceny hlavne pro localhost/Windows.
+- Na Railway nema smysl nastavovat `PVZP_BROWSER_PATH`, pokud staci automaticky nalezeny Playwright nebo systemovy Chromium browser.
 
 ## Poznamka k datum
 
