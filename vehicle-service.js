@@ -8,35 +8,15 @@ const cheerio = require("cheerio");
 
 const ENABLE_MOCK_DATA = String(process.env.ENABLE_MOCK_DATA || "true").toLowerCase() !== "false";
 const ARES_ENABLED = String(process.env.ARES_ENABLED || "true").toLowerCase() !== "false";
-const UNIQA_LOOKUP_ENABLED = String(process.env.UNIQA_LOOKUP_ENABLED || "true").toLowerCase() !== "false";
-const UNIQA_PHONE = normalizeWhitespace(process.env.UNIQA_PHONE || "+420 700 700 700") || "+420 700 700 700";
-const UNIQA_HEADLESS = String(process.env.UNIQA_HEADLESS || (process.platform === "linux" ? "true" : "false")).toLowerCase() === "true";
-const BROWSERLESS_TOKEN = normalizeWhitespace(process.env.BROWSERLESS_TOKEN || "");
-const BROWSERLESS_WS_URL = normalizeWhitespace(process.env.BROWSERLESS_WS_URL || "");
-const BROWSERLESS_REGION = normalizeWhitespace(process.env.BROWSERLESS_REGION || "lon") || "lon";
-const BROWSERLESS_BROWSER = normalizeWhitespace(process.env.BROWSERLESS_BROWSER || "chrome") || "chrome";
-const BROWSERLESS_STEALTH = String(process.env.BROWSERLESS_STEALTH || "true").toLowerCase() !== "false";
-const BROWSERLESS_ENABLED = Boolean(BROWSERLESS_WS_URL || BROWSERLESS_TOKEN);
-const UNIQA_BROWSER_INFO = resolveUniqaBrowserInfo();
-const UNIQA_BROWSER_PATH = UNIQA_BROWSER_INFO.path;
-const UNIQA_USER_AGENT =
-  process.env.UNIQA_USER_AGENT ||
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
-const UNIQA_CACHE_TTL_MS = Math.max(0, Number(process.env.UNIQA_CACHE_TTL_MS || 900000) || 900000);
-const UNIQA_DEBUG_CAPTURE = String(process.env.UNIQA_DEBUG_CAPTURE || "false").toLowerCase() === "true";
-const UNIQA_DEBUG_TOKEN = normalizeWhitespace(process.env.UNIQA_DEBUG_TOKEN || "");
-const UNIQA_DEBUG_KEEP = Math.max(1, Number(process.env.UNIQA_DEBUG_KEEP || 8) || 8);
-const UNIQA_DEBUG_POST_SUBMIT_STEPS = Math.max(1, Number(process.env.UNIQA_DEBUG_POST_SUBMIT_STEPS || 6) || 6);
-const UNIQA_DEBUG_POST_SUBMIT_INTERVAL_MS = Math.max(500, Number(process.env.UNIQA_DEBUG_POST_SUBMIT_INTERVAL_MS || 1500) || 1500);
-const UNIQA_LOOKUP_CACHE = new Map();
-const PVZP_LOOKUP_ENABLED = String(process.env.PVZP_LOOKUP_ENABLED || process.env.UNIQA_LOOKUP_ENABLED || "true").toLowerCase() !== "false";
-const PVZP_HEADLESS = String(process.env.PVZP_HEADLESS || process.env.UNIQA_HEADLESS || (process.platform === "linux" ? "true" : "false")).toLowerCase() === "true";
+const PVZP_LOOKUP_ENABLED = String(process.env.PVZP_LOOKUP_ENABLED || "true").toLowerCase() !== "false";
+const PVZP_HEADLESS = String(process.env.PVZP_HEADLESS || (process.platform === "linux" ? "true" : "false")).toLowerCase() === "true";
 const PVZP_BROWSER_INFO = resolvePvzpBrowserInfo();
 const PVZP_BROWSER_PATH = PVZP_BROWSER_INFO.path;
 const PVZP_USER_AGENT =
   process.env.PVZP_USER_AGENT ||
-  process.env.UNIQA_USER_AGENT ||
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
+const PVZP_CACHE_TTL_MS = Math.max(0, Number(process.env.PVZP_CACHE_TTL_MS || 900000) || 900000);
+const FAST_LOOKUP_MODE = String(process.env.FAST_LOOKUP_MODE || "true").toLowerCase() !== "false";
 const PVZP_LOOKUP_CACHE = new Map();
 const OPEN_DATA_CACHE_TTL_MS = Math.max(60000, Number(process.env.OPEN_DATA_CACHE_TTL_MS || 21600000) || 21600000);
 const OPEN_DATA_TOKEN_CACHE = { value: null, expiresAt: 0 };
@@ -69,8 +49,6 @@ const FLEET_DB_OWNER_DIR = path.join(FLEET_DB_DIR, "owners");
 const FLEET_DB_VEHICLE_DIR = path.join(FLEET_DB_DIR, "vehicles");
 const FLEET_DB_OWNER_SHARD_CACHE = new Map();
 const FLEET_DB_VEHICLE_SHARD_CACHE = new Map();
-const UNIQA_DEBUG_DIR = path.join(__dirname, ".cache", "uniqa-debug");
-const UNIQA_DEBUG_LATEST_FILE = path.join(UNIQA_DEBUG_DIR, "latest.json");
 
 const MOCK_VEHICLES = [
   {
@@ -270,8 +248,8 @@ function getLookupRuntimeStatus() {
       browserSource: PVZP_BROWSER_INFO.source,
       headless: PVZP_HEADLESS,
       displayAvailable: Boolean(process.env.DISPLAY),
-      debugCaptureEnabled: UNIQA_DEBUG_CAPTURE,
-      debugTokenConfigured: Boolean(UNIQA_DEBUG_TOKEN)
+      debugCaptureEnabled: false,
+      debugTokenConfigured: false
     },
     warnings: []
   };
@@ -331,7 +309,6 @@ function formatLookupSource(source) {
   const labels = {
     "transport-cube": "Transport provider",
     "official-vin-api": "Verejne VIN API",
-    "uniqa-browser": "UNIQA fallback",
     "pvzp-browser": "PVZP fallback",
     "hlidac-statu": "Hlidac statu",
     demo: "Demo dataset"
@@ -385,7 +362,9 @@ async function lookupVehicle(query, options = {}) {
   const liveRecord = await lookupFromConfiguredProvider(lookup, diagnostics);
   const pvzpRecord = liveRecord ? null : await lookupFromPvzpBrowser(lookup, diagnostics);
   const officialVinLookup = resolveSupplementalVinLookup(lookup, liveRecord || pvzpRecord);
-  const publicVinRecord = liveRecord ? null : await lookupFromOfficialVinApi(officialVinLookup || lookup, diagnostics);
+  const publicVinRecord = liveRecord
+    ? null
+    : await lookupFromOfficialVinApiWithBudget(officialVinLookup || lookup, diagnostics, lookup.type === "plate");
   let ownershipRecord = null;
   const mockRecord = liveRecord || publicVinRecord || pvzpRecord ? null : findMockVehicle(lookup);
   const baseSeed = liveRecord || publicVinRecord || pvzpRecord || mockRecord;
@@ -404,7 +383,7 @@ async function lookupVehicle(query, options = {}) {
     });
   }
 
-  if (shouldUseHlidacOwnershipFallback(baseRecord, ownershipLookup)) {
+  if (shouldUseHlidacOwnershipFallback(baseRecord, ownershipLookup) && !(FAST_LOOKUP_MODE && lookup.type === "plate")) {
     try {
       ownershipRecord = await lookupOwnershipFromHlidacStatu(ownershipLookup);
       recordLookupAttempt(diagnostics, {
@@ -432,7 +411,10 @@ async function lookupVehicle(query, options = {}) {
 
   const enriched = await enrichCompanies(record);
   const withInspectionState = await attachInspectionState(enriched, options);
-  const withRegistryState = await attachPublicRegistryState(withInspectionState);
+  const shouldAttachRegistryState = !FAST_LOOKUP_MODE || lookup.type === "vin";
+  const withRegistryState = shouldAttachRegistryState
+    ? await attachPublicRegistryState(withInspectionState)
+    : withInspectionState;
   const sanitized = sanitizeClientRecord(withRegistryState);
   return {
     diagnostics,
@@ -619,7 +601,7 @@ async function lookupFromOfficialVinApi(lookup, diagnostics) {
           Accept: "application/json",
           api_key: apiKey
         },
-        timeoutMs: 15000
+        timeoutMs: 6000
       }
     );
 
@@ -656,6 +638,19 @@ async function lookupFromOfficialVinApi(lookup, diagnostics) {
     });
     return null;
   }
+}
+
+async function lookupFromOfficialVinApiWithBudget(lookup, diagnostics, useFastBudget) {
+  if (!useFastBudget || !FAST_LOOKUP_MODE) {
+    return await lookupFromOfficialVinApi(lookup, diagnostics);
+  }
+
+  return await Promise.race([
+    lookupFromOfficialVinApi(lookup, diagnostics),
+    new Promise((resolve) => {
+      setTimeout(() => resolve(null), 2500);
+    })
+  ]);
 }
 
 async function lookupFromPvzpBrowser(lookup, diagnostics) {
@@ -701,8 +696,8 @@ async function lookupFromPvzpBrowser(lookup, diagnostics) {
   }
 
   const attempts = [
-    { initialDelayMs: 2500, typeDelayMs: 120, responseDelayMs: 7000 },
-    { initialDelayMs: 3500, typeDelayMs: 180, responseDelayMs: 9000 }
+    { initialDelayMs: 700, typeDelayMs: 40, responseDelayMs: 1800 },
+    { initialDelayMs: 1200, typeDelayMs: 80, responseDelayMs: 2600 }
   ];
 
   let lastError = null;
@@ -848,153 +843,6 @@ async function createUniqaBrowserSession() {
   return { browser, page };
 }
 
-async function createUniqaDebugSession(lookup, attempt) {
-  if (!UNIQA_DEBUG_CAPTURE) {
-    return null;
-  }
-
-  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const dir = path.join(UNIQA_DEBUG_DIR, id);
-  await fs.promises.mkdir(dir, { recursive: true });
-
-  return {
-    id,
-    dir,
-    createdAt: new Date().toISOString(),
-    lookup: {
-      compact: lookup?.compact || null,
-      type: lookup?.type || null
-    },
-    attempt,
-    artifacts: [],
-    responses: []
-  };
-}
-
-async function captureUniqaDebugSnapshot(page, session, label) {
-  if (!session || !page) {
-    return;
-  }
-
-  const safeLabel = label.toLowerCase().replace(/[^a-z0-9_-]/g, "-");
-  const screenshotName = `${safeLabel}.jpg`;
-  const htmlName = `${safeLabel}.html`;
-  const stateName = `${safeLabel}.json`;
-
-  try {
-    await page.screenshot({
-      path: path.join(session.dir, screenshotName),
-      type: "jpeg",
-      quality: 80,
-      fullPage: true
-    });
-    session.artifacts.push({ name: screenshotName, kind: "image/jpeg" });
-  } catch (error) {}
-
-  try {
-    const html = await page.content();
-    await fs.promises.writeFile(path.join(session.dir, htmlName), html, "utf8");
-    session.artifacts.push({ name: htmlName, kind: "text/html" });
-  } catch (error) {}
-
-  try {
-    const state = {
-      label,
-      capturedAt: new Date().toISOString(),
-      url: page.url(),
-      title: await page.title().catch(() => null)
-    };
-    await fs.promises.writeFile(path.join(session.dir, stateName), JSON.stringify(state, null, 2), "utf8");
-    session.artifacts.push({ name: stateName, kind: "application/json" });
-  } catch (error) {}
-}
-
-async function captureUniqaDebugPostSubmit(page, session, totalWaitMs) {
-  if (!session || !page) {
-    if (page && totalWaitMs > 0) {
-      await page.waitForTimeout(totalWaitMs);
-    }
-    return;
-  }
-
-  let elapsed = 0;
-  for (let index = 1; index <= UNIQA_DEBUG_POST_SUBMIT_STEPS; index += 1) {
-    const remaining = totalWaitMs - elapsed;
-    if (remaining <= 0) {
-      break;
-    }
-
-    const delay = Math.min(UNIQA_DEBUG_POST_SUBMIT_INTERVAL_MS, remaining);
-    await page.waitForTimeout(delay);
-    elapsed += delay;
-    await captureUniqaDebugSnapshot(page, session, `03-after-submit-${String(index).padStart(2, "0")}`);
-  }
-
-  if (elapsed < totalWaitMs) {
-    await page.waitForTimeout(totalWaitMs - elapsed);
-  }
-
-  await captureUniqaDebugSnapshot(page, session, "04-after-submit-final");
-}
-
-async function appendUniqaDebugResponse(session, payload) {
-  if (!session) {
-    return;
-  }
-
-  session.responses.push(payload);
-  if (session.responses.length > 6) {
-    session.responses = session.responses.slice(-6);
-  }
-}
-
-async function finalizeUniqaDebugSession(session, status, extra) {
-  if (!session) {
-    return null;
-  }
-
-  const metadata = {
-    id: session.id,
-    createdAt: session.createdAt,
-    finishedAt: new Date().toISOString(),
-    status,
-    lookup: session.lookup,
-    attempt: session.attempt,
-    artifacts: session.artifacts,
-    responses: session.responses,
-    ...extra
-  };
-
-  await fs.promises.writeFile(path.join(session.dir, "meta.json"), JSON.stringify(metadata, null, 2), "utf8");
-  await fs.promises.mkdir(UNIQA_DEBUG_DIR, { recursive: true });
-  await fs.promises.writeFile(UNIQA_DEBUG_LATEST_FILE, JSON.stringify(metadata, null, 2), "utf8");
-  await pruneUniqaDebugSessions();
-  return metadata;
-}
-
-async function pruneUniqaDebugSessions() {
-  if (!UNIQA_DEBUG_CAPTURE) {
-    return;
-  }
-
-  const entries = await fs.promises.readdir(UNIQA_DEBUG_DIR, { withFileTypes: true }).catch(() => []);
-  const directories = await Promise.all(
-    entries
-      .filter((entry) => entry.isDirectory())
-      .map(async (entry) => {
-        const fullPath = path.join(UNIQA_DEBUG_DIR, entry.name);
-        const stat = await fs.promises.stat(fullPath).catch(() => null);
-        return stat ? { fullPath, mtimeMs: stat.mtimeMs } : null;
-      })
-  );
-
-  const stale = directories
-    .filter(Boolean)
-    .sort((left, right) => right.mtimeMs - left.mtimeMs)
-    .slice(UNIQA_DEBUG_KEEP);
-
-  await Promise.all(stale.map((entry) => fs.promises.rm(entry.fullPath, { recursive: true, force: true })));
-}
 
 function resolveSupplementalVinLookup(originalLookup, record) {
   if (originalLookup.type === "vin") {
@@ -1013,10 +861,9 @@ function resolveSupplementalVinLookup(originalLookup, record) {
 async function executePvzpBrowserLookup(lookup, attempt) {
   const browserSession = await createPvzpBrowserSession();
   const { browser, page } = browserSession;
-  const debugSession = await createUniqaDebugSession(lookup, attempt);
 
   try {
-    await applyUniqaStealth(page);
+    await applyBrowserStealth(page);
     await configurePvzpPage(page);
 
     await page.goto("https://online.pvzp.cz/clfe/motor/#/policy", {
@@ -1024,37 +871,13 @@ async function executePvzpBrowserLookup(lookup, attempt) {
       timeout: 60000
     });
     await page.waitForTimeout(attempt.initialDelayMs);
-    await captureUniqaDebugSnapshot(page, debugSession, "01-loaded");
 
     await page.locator('input[formcontrolname="registrationPlateNumber"]').fill(lookup.compact);
     await page.waitForTimeout(Math.max(600, attempt.typeDelayMs));
-    await captureUniqaDebugSnapshot(page, debugSession, "02-filled");
     await page.locator('input[type="button"][value="Doplnit údaje o vozidle"]').click({ force: true });
-    await captureUniqaDebugPostSubmit(page, debugSession, attempt.responseDelayMs);
+    await waitForPvzpVin(page, attempt.responseDelayMs);
 
-    const payload = await extractPvzpVehicleData(page, lookup);
-    if (payload) {
-      await appendUniqaDebugResponse(debugSession, payload);
-      await finalizeUniqaDebugSession(debugSession, "success", {
-        responseCount: 1
-      });
-      return payload;
-    }
-
-    await finalizeUniqaDebugSession(debugSession, "miss", {
-      responseCount: 0,
-      note: "PVZP po doplneni udaju nevratilo pouzitelny VIN."
-    });
-    return null;
-  } catch (error) {
-    if (debugSession) {
-      await finalizeUniqaDebugSession(debugSession, "error", {
-        error: formatLookupError(error)
-      }).catch(() => {});
-      error.uniqaDebugId = debugSession.id;
-      error.message = `${error.message} [debugId:${debugSession.id}]`;
-    }
-    throw error;
+    return await extractPvzpVehicleData(page, lookup);
   } finally {
     await browser.close().catch(() => {});
   }
@@ -1122,6 +945,20 @@ async function extractPvzpVehicleData(page, lookup) {
   return result?.vin ? result : null;
 }
 
+async function waitForPvzpVin(page, timeoutMs) {
+  try {
+    await page.waitForFunction(
+      () => {
+        const vin = document.querySelector('input[formcontrolname="vin"]');
+        return Boolean(vin && vin.value && vin.value.trim().length >= 17);
+      },
+      { timeout: timeoutMs }
+    );
+  } catch (error) {
+    await page.waitForTimeout(Math.min(600, timeoutMs));
+  }
+}
+
 function normalizePvzpPayload(payload, lookup) {
   if (!payload?.vin) {
     return null;
@@ -1140,39 +977,7 @@ function normalizePvzpPayload(payload, lookup) {
   );
 }
 
-function assertUniqaDebugAccess(token) {
-  if (!UNIQA_DEBUG_CAPTURE || !UNIQA_DEBUG_TOKEN || token !== UNIQA_DEBUG_TOKEN) {
-    const error = new Error("Pristup k UNIQA debug artifactum byl odmitnut.");
-    error.code = "FORBIDDEN";
-    throw error;
-  }
-}
-
-async function readLatestUniqaDebug(token) {
-  assertUniqaDebugAccess(token);
-  return await readJsonFile(UNIQA_DEBUG_LATEST_FILE);
-}
-
-async function resolveUniqaDebugArtifact(token, id, name) {
-  assertUniqaDebugAccess(token);
-
-  const safeId = String(id || "").replace(/[^a-zA-Z0-9_-]/g, "");
-  const safeName = path.basename(String(name || ""));
-  if (!safeId || !safeName) {
-    return null;
-  }
-
-  const candidatePath = path.normalize(path.join(UNIQA_DEBUG_DIR, safeId, safeName));
-  const allowedRoot = path.normalize(path.join(UNIQA_DEBUG_DIR, safeId));
-  if (!candidatePath.startsWith(allowedRoot)) {
-    return null;
-  }
-
-  const stat = await fs.promises.stat(candidatePath).catch(() => null);
-  return stat && stat.isFile() ? candidatePath : null;
-}
-
-async function applyUniqaStealth(page) {
+async function applyBrowserStealth(page) {
   await page.addInitScript(() => {
     Object.defineProperty(navigator, "webdriver", {
       get: () => undefined
@@ -1186,71 +991,6 @@ async function applyUniqaStealth(page) {
   });
 }
 
-async function configureUniqaPage(page) {
-  if (!page) {
-    return;
-  }
-
-  try {
-    await page.setViewportSize({ width: 1366, height: 900 });
-  } catch (error) {}
-
-  try {
-    await page.setExtraHTTPHeaders({
-      "Accept-Language": "cs-CZ,cs;q=0.9,en-US;q=0.8,en;q=0.7"
-    });
-  } catch (error) {}
-
-  try {
-    const cdp = await page.context().newCDPSession(page);
-    await cdp.send("Network.setUserAgentOverride", {
-      userAgent: UNIQA_USER_AGENT,
-      acceptLanguage: "cs-CZ,cs;q=0.9,en-US;q=0.8,en;q=0.7",
-      platform: "Windows"
-    });
-  } catch (error) {}
-}
-
-function getBrowserlessWebSocketUrl() {
-  if (BROWSERLESS_WS_URL) {
-    return BROWSERLESS_WS_URL;
-  }
-
-  if (!BROWSERLESS_TOKEN) {
-    throw new Error("Chybi BROWSERLESS_TOKEN nebo BROWSERLESS_WS_URL.");
-  }
-
-  const pathSuffix =
-    BROWSERLESS_BROWSER === "chrome"
-      ? BROWSERLESS_STEALTH
-        ? "/chrome/stealth"
-        : "/chrome"
-      : "";
-
-  return `wss://production-${BROWSERLESS_REGION}.browserless.io${pathSuffix}?token=${encodeURIComponent(BROWSERLESS_TOKEN)}`;
-}
-
-function normalizeUniqaPayload(payload, lookup) {
-  if (!payload || payload.result !== true) {
-    return null;
-  }
-
-  const vehicleInfo = payload.vehicleInfo && typeof payload.vehicleInfo === "object" ? payload.vehicleInfo : null;
-  const selectedVehicle =
-    vehicleInfo ||
-    (Array.isArray(payload.vehicleSelections) ? payload.vehicleSelections.find(Boolean) : null);
-
-  if (!selectedVehicle) {
-    return null;
-  }
-
-  return normalizeGenericPayload(
-    { ...payload, vehicleInfo: selectedVehicle },
-    lookup,
-    "UNIQA kalkulacka",
-    "Reverzni SPZ/VIN doplneni bylo nacteno z verejne kalkulacky UNIQA v realnem prohlizeci."
-  );
-}
 
 async function lookupOwnershipFromHlidacStatu(lookup) {
   if (lookup.type !== "vin") {
@@ -2425,7 +2165,7 @@ function getCachedPvzpRecord(key) {
 function setCachedPvzpRecord(key, record) {
   PVZP_LOOKUP_CACHE.set(key, {
     record: clone(record),
-    expiresAt: Date.now() + Math.max(0, Number(process.env.PVZP_CACHE_TTL_MS || process.env.UNIQA_CACHE_TTL_MS || 900000) || 900000)
+    expiresAt: Date.now() + Math.max(0, Number(process.env.PVZP_CACHE_TTL_MS || 900000) || 900000)
   });
 }
 
@@ -5010,35 +4750,6 @@ function joinUniqueText(values, separator) {
   return Array.from(new Set(values.map((value) => normalizeWhitespace(value)).filter(Boolean))).join(separator);
 }
 
-function resolveUniqaBrowserInfo() {
-  if (BROWSERLESS_ENABLED) {
-    return {
-      path: null,
-      source: "browserless"
-    };
-  }
-
-  const explicitPath = normalizeWhitespace(process.env.UNIQA_BROWSER_PATH || "");
-  if (explicitPath) {
-    return {
-      path: fs.existsSync(explicitPath) ? explicitPath : null,
-      source: fs.existsSync(explicitPath) ? "env" : "env-missing"
-    };
-  }
-
-  const systemBrowserPath = detectSystemBrowserPath();
-  if (systemBrowserPath) {
-    return { path: systemBrowserPath, source: "system" };
-  }
-
-  const playwrightBrowserPath = detectPlaywrightBrowserPath();
-  if (playwrightBrowserPath) {
-    return { path: playwrightBrowserPath, source: "playwright" };
-  }
-
-  return { path: null, source: null };
-}
-
 function detectSystemBrowserPath() {
   const candidates = [
     "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
@@ -5059,68 +4770,11 @@ function detectPlaywrightBrowserPath() {
   }
 }
 
-function buildUniqaLaunchOptions() {
-  const args = ["--window-size=1366,900"];
-
-  if (process.platform === "win32") {
-    args.push("--start-minimized", "--window-position=-32000,-32000");
-  }
-
-  args.push("--disable-blink-features=AutomationControlled");
-
-  if (process.platform === "linux") {
-    args.push("--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage");
-  }
-
-  return {
-    executablePath: UNIQA_BROWSER_PATH || undefined,
-    headless: UNIQA_HEADLESS,
-    args
-  };
-}
-
-function getCachedUniqaRecord(key) {
-  const cached = UNIQA_LOOKUP_CACHE.get(key);
-  if (!cached) {
-    return null;
-  }
-
-  if (cached.expiresAt <= Date.now()) {
-    UNIQA_LOOKUP_CACHE.delete(key);
-    return null;
-  }
-
-  return cached.record;
-}
-
-function setCachedUniqaRecord(key, record) {
-  UNIQA_LOOKUP_CACHE.set(key, {
-    record: clone(record),
-    expiresAt: Date.now() + UNIQA_CACHE_TTL_MS
-  });
-}
-
-function findSuccessfulUniqaResponse(responses) {
-  for (let index = responses.length - 1; index >= 0; index -= 1) {
-    const response = responses[index];
-    if (
-      response &&
-      response.result === true &&
-      (response.vehicleFound || response.vehicleInfo || (Array.isArray(response.vehicleSelections) && response.vehicleSelections.length > 0))
-    ) {
-      return response;
-    }
-  }
-
-  return null;
-}
-
 module.exports = {
   getLookupRuntimeStatus,
   lookupVehicle,
   lookupVehiclesByIco,
   lookupVehicleInspections,
-  describeLookupFailure,
-  readLatestUniqaDebug,
-  resolveUniqaDebugArtifact
+  describeLookupFailure
 };
+
