@@ -4582,9 +4582,12 @@ function requestStructured(targetUrl, options, responseType) {
         try {
           resolve(JSON.parse(payload));
         } catch (error) {
-          const parseError = new Error("Rozhrani nevratilo validni JSON.");
+          const parseError = new Error(
+            `Rozhrani nevratilo validni JSON: ${payload.slice(0, 200) || "bez detailu"}`
+          );
           parseError.code = "INVALID_JSON";
           parseError.targetHost = requestUrl.host;
+          parseError.responseSnippet = payload.slice(0, 200) || "bez detailu";
           reject(parseError);
         }
       });
