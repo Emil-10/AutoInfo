@@ -383,24 +383,22 @@ async function lookupVehicle(query, options = {}) {
     });
   }
 
-  if (shouldUseHlidacOwnershipFallback(baseRecord, ownershipLookup) && !(FAST_LOOKUP_MODE && lookup.type === "plate")) {
-    try {
-      ownershipRecord = await lookupOwnershipFromHlidacStatu(ownershipLookup);
-      recordLookupAttempt(diagnostics, {
-        source: "hlidac-statu",
-        status: ownershipRecord ? "success" : "miss",
-        detail: ownershipRecord
-          ? "Doplnila se historie vlastniku a provozovatelu."
-          : "Verejny prehled vlastniku nevratil dalsi data."
-      });
-    } catch (error) {
-      ownershipRecord = null;
-      recordLookupAttempt(diagnostics, {
-        source: "hlidac-statu",
-        status: "error",
-        detail: formatLookupError(error)
-      });
-    }
+  try {
+    ownershipRecord = await lookupOwnershipFromOpenData(lookup, baseRecord);
+    recordLookupAttempt(diagnostics, {
+      source: "owner-open-data",
+      status: ownershipRecord ? "success" : "miss",
+      detail: ownershipRecord
+        ? "Doplnila se historie vlastniku a provozovatelu z otevrenych dat."
+        : "Otevrena data vlastniku/provozovatelu nevratila dalsi subjekty."
+    });
+  } catch (error) {
+    ownershipRecord = null;
+    recordLookupAttempt(diagnostics, {
+      source: "owner-open-data",
+      status: "error",
+      detail: formatLookupError(error)
+    });
   }
 
   const record = mergeRecords(baseRecord, ownershipRecord) || ownershipRecord;
@@ -975,6 +973,80 @@ function normalizePvzpPayload(payload, lookup) {
     "PVZP kalkulacka",
     "Reverzni SPZ/VIN doplneni bylo nacteno z kalkulacky PVZP."
   );
+}
+
+async function lookupOwnershipFromOpenData(originalLookup, record) {
+  if (!record || typeof record !== "object") {
+    return null;
+  }
+
+  await ensureOpenDataPersistentCachesLoaded();
+
+  const vin = normalizeWhitespace(extractIdentifier(record, "VIN")).toUpperCase() || null;
+  let pcv = normalizeWhitespace(extractIdentifier(record, "PČV")) || null;
+
+  if (!pcv && vin) {
+    pcv = getPersistentPcv(vin) || null;
+  }
+
+  if (!pcv && vin) {
+    try {
+      pcv = await resolvePcvForVin(vin);
+      if (pcv) {
+        await storePersistentPcv(vin, pcv);
+      }
+    } catch (error) {
+      pcv = null;
+    }
+  }
+
+  if (!pcv) {
+    return null;
+  }
+
+  const dataset = await ensureOpenDataDatasetLocal("owners", OPEN_DATA_OWNER_ROUTE);
+  const relations = await findOpenDataRowsByPcv(dataset.localPath, pcv, normalizeCompanyVehicleRelation);
+  const parties = relations
+    .filter((relation) => relation?.current)
+    .map((relation) => ({
+      role: relation.relation || "Subjekt",
+      type: relation.ico ? "company" : normalizeWhitespace(relation.subjectType).toLowerCase().includes("fyz") ? "person" : "unknown",
+      name: relation.name || (relation.ico ? null : "Fyzicka osoba"),
+      ico: relation.ico || null,
+      address: relation.address || null,
+      period: [relation.dateFrom ? formatDate(relation.dateFrom) : null, relation.dateTo ? formatDate(relation.dateTo) : "-"]
+        .filter(Boolean)
+        .join(" - "),
+      since: relation.dateFrom ? formatDate(relation.dateFrom) : null
+    }))
+    .filter((party) => party.name || party.ico);
+
+  if (parties.length === 0) {
+    return null;
+  }
+
+  return {
+    source: {
+      mode: "live",
+      label: "RSV vlastnici/provozovatele",
+      note: "Pravnicke osoby jsou doplnene z otevrene sady vlastnik/provozovatel vozidla."
+    },
+    hero: {
+      badge: parties.some((party) => party.type === "company") ? "Pravnicka osoba" : record.hero?.badge || "Bez rozliseni",
+      title: record.hero?.title || `Vozidlo ${vin || pcv || originalLookup.compact}`,
+      subtitle: record.hero?.subtitle || "Historie vlastniku a provozovatelu z otevrenych dat.",
+      status: record.hero?.status || "Neuvedeno"
+    },
+    highlights: [],
+    ownership: {
+      ownerCount: countRole(parties, "vlast") || null,
+      operatorCount: countRole(parties, "provoz") || null,
+      note: "U fyzickych osob se identita obvykle nezobrazuje.",
+      parties
+    },
+    sections: [],
+    timeline: []
+  };
 }
 
 async function applyBrowserStealth(page) {
