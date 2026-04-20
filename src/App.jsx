@@ -21,8 +21,6 @@ import { Input } from "./components/ui/input";
 import { Skeleton } from "./components/ui/skeleton";
 import { cn } from "./lib/utils";
 
-const DEMO_EXAMPLES = ["1AB2345", "TMBJJ7NE8L0123456", "5AC5678", "27074358"];
-
 export default function App() {
   const [query, setQuery] = useState("");
   const [result, setResult] = useState(null);
@@ -30,9 +28,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
   const [selectedType, setSelectedType] = useState("plate");
-  const [statusText, setStatusText] = useState(
-    "Zadej SPZ, ICO nebo 17mistny VIN. Rozhrani typ pozna automaticky."
-  );
+  const [statusText, setStatusText] = useState("");
 
   const detectedType = useMemo(() => detectType(query), [query]);
 
@@ -104,6 +100,74 @@ export default function App() {
       }
     };
   }, [result?.inspectionLookup?.status, result?.inspectionLookup?.vin, result?.inspectionLookup?.pcv, result?.query?.raw]);
+
+  useEffect(() => {
+    const ownershipLookup = result?.ownershipLookup;
+
+    if (!ownershipLookup || ownershipLookup.status !== "pending") {
+      return undefined;
+    }
+
+    let cancelled = false;
+    let attempts = 0;
+    let timeoutId = null;
+
+    const poll = async () => {
+      attempts += 1;
+
+      const params = new URLSearchParams();
+      if (ownershipLookup.vin) {
+        params.set("vin", ownershipLookup.vin);
+      }
+      if (ownershipLookup.pcv) {
+        params.set("pcv", ownershipLookup.pcv);
+      }
+      if (!ownershipLookup.vin && !ownershipLookup.pcv && result?.query?.raw) {
+        params.set("query", result.query.raw);
+      }
+
+      try {
+        const response = await fetch(`/api/lookup/ownership?${params.toString()}`, {
+          headers: { Accept: "application/json" }
+        });
+        const payload = await response.json();
+
+        if (cancelled) {
+          return;
+        }
+
+        if (response.ok && payload.status === "ready" && payload.ownership) {
+          setResult((current) =>
+            current
+              ? {
+                  ...current,
+                  ownership: payload.ownership,
+                  ownershipLookup: payload
+                }
+              : current
+          );
+          return;
+        }
+
+        if (payload.status === "pending" && attempts < 24) {
+          timeoutId = window.setTimeout(poll, attempts < 6 ? 1500 : 3000);
+        }
+      } catch (error) {
+        if (!cancelled && attempts < 10) {
+          timeoutId = window.setTimeout(poll, 3000);
+        }
+      }
+    };
+
+    poll();
+
+    return () => {
+      cancelled = true;
+      if (timeoutId) {
+        window.clearTimeout(timeoutId);
+      }
+    };
+  }, [result?.ownershipLookup?.status, result?.ownershipLookup?.vin, result?.ownershipLookup?.pcv, result?.query?.raw]);
 
   async function performLookup(nextQuery) {
     const trimmed = nextQuery.trim();
@@ -185,10 +249,6 @@ export default function App() {
             <h1 className={cn("mx-auto max-w-4xl font-semibold tracking-[-0.05em] text-white", hasSearched ? "text-4xl sm:text-5xl" : "text-5xl sm:text-7xl")}>
               Najdi vozidlo podle VIN nebo SPZ.
             </h1>
-            <p className="mx-auto mt-5 max-w-2xl text-balance text-sm leading-7 text-muted-foreground sm:text-base">
-              Jedno pole, automaticke rozpoznani typu a okamzity prehled toho
-              podstatneho v co nejcistsim rozlozeni.
-            </p>
           </div>
 
           <Card className="border-white/10 bg-card/80 backdrop-blur-xl">
@@ -243,13 +303,7 @@ export default function App() {
                       className="h-14 border-white/10 bg-secondary pl-12 pr-4 text-base shadow-inner shadow-black/20 placeholder:text-muted-foreground/80"
                       maxLength={24}
                       onChange={(event) => handleQueryChange(event.target.value)}
-                      placeholder={
-                        selectedType === "vin"
-                          ? "Napr. WAUZZZF41NA010563"
-                          : selectedType === "ico"
-                            ? "Napr. 27074358"
-                          : "Napr. 1AB2345"
-                      }
+                      placeholder=""
                       value={query}
                     />
                   </div>
@@ -269,27 +323,7 @@ export default function App() {
                   </Button>
                 </div>
 
-                <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-                  <p className="text-sm leading-6 text-muted-foreground">{statusText}</p>
-                  <div className="flex flex-wrap gap-2">
-                    {DEMO_EXAMPLES.map((example) => (
-                      <Button
-                        className="rounded-full"
-                        key={example}
-                        onClick={() => {
-                          setQuery(example);
-                          setSelectedType(detectType(example));
-                          performLookup(example);
-                        }}
-                        size="sm"
-                        type="button"
-                        variant="ghost"
-                      >
-                        {example}
-                      </Button>
-                    ))}
-                  </div>
-                </div>
+                <p className="text-sm leading-6 text-muted-foreground">{statusText}</p>
               </form>
             </CardContent>
           </Card>

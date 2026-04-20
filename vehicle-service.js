@@ -22,12 +22,15 @@ const OPEN_DATA_CACHE_TTL_MS = Math.max(60000, Number(process.env.OPEN_DATA_CACH
 const OPEN_DATA_TOKEN_CACHE = { value: null, expiresAt: 0 };
 const OPEN_DATA_PCV_CACHE = new Map();
 const OPEN_DATA_INSPECTION_CACHE = new Map();
+const OPEN_DATA_OWNERSHIP_CACHE = new Map();
 const OPEN_DATA_PERSISTENT_PCV_INDEX = new Map();
 const OPEN_DATA_PERSISTENT_INSPECTION_INDEX = new Map();
+const OPEN_DATA_PERSISTENT_OWNER_INDEX = new Map();
 const OPEN_DATA_DOWNLOADS = new Map();
 const OPEN_DATA_PERSIST_DIR = path.join(__dirname, ".cache", "open-data");
 const OPEN_DATA_PCV_FILE = path.join(OPEN_DATA_PERSIST_DIR, "vin-to-pcv.json");
 const OPEN_DATA_INSPECTION_FILE = path.join(OPEN_DATA_PERSIST_DIR, "inspections-by-pcv.json");
+const OPEN_DATA_OWNERSHIP_FILE = path.join(OPEN_DATA_PERSIST_DIR, "ownership-by-pcv.json");
 const OPEN_DATA_DATASET_FILE = path.join(OPEN_DATA_PERSIST_DIR, "datasets.json");
 const OPEN_DATA_VEHICLE_ROUTE = "/vypiszregistru/vypisvozidel";
 const OPEN_DATA_INSPECTION_ROUTE = "/vypiszregistru/technickeprohlidky";
@@ -38,6 +41,7 @@ let openDataPersistentLoaded = false;
 let openDataPersistPromise = null;
 const OPEN_DATA_DATASET_CACHE = Object.create(null);
 const OPEN_DATA_JOBS = new Map();
+const OPEN_DATA_OWNER_JOBS = new Map();
 const TAXI_LOOKUP_CACHE = new Map();
 const POLICE_WANTED_CACHE = new Map();
 const OPEN_DATA_IMPORT_CACHE = new Map();
@@ -365,11 +369,9 @@ async function lookupVehicle(query, options = {}) {
   const publicVinRecord = liveRecord
     ? null
     : await lookupFromOfficialVinApiWithBudget(officialVinLookup || lookup, diagnostics, lookup.type === "plate");
-  let ownershipRecord = null;
   const mockRecord = liveRecord || publicVinRecord || pvzpRecord ? null : findMockVehicle(lookup);
   const baseSeed = liveRecord || publicVinRecord || pvzpRecord || mockRecord;
   const baseRecord = mergeSupplementalRecord(baseSeed, pvzpRecord);
-  const ownershipLookup = resolveOwnershipLookup(lookup, baseRecord);
 
   if (!liveRecord && !publicVinRecord && !pvzpRecord) {
     recordLookupAttempt(diagnostics, {
@@ -383,25 +385,7 @@ async function lookupVehicle(query, options = {}) {
     });
   }
 
-  try {
-    ownershipRecord = await lookupOwnershipFromOpenData(lookup, baseRecord);
-    recordLookupAttempt(diagnostics, {
-      source: "owner-open-data",
-      status: ownershipRecord ? "success" : "miss",
-      detail: ownershipRecord
-        ? "Doplnila se historie vlastniku a provozovatelu z otevrenych dat."
-        : "Otevrena data vlastniku/provozovatelu nevratila dalsi subjekty."
-    });
-  } catch (error) {
-    ownershipRecord = null;
-    recordLookupAttempt(diagnostics, {
-      source: "owner-open-data",
-      status: "error",
-      detail: formatLookupError(error)
-    });
-  }
-
-  const record = mergeRecords(baseRecord, ownershipRecord) || ownershipRecord;
+  const record = baseRecord;
 
   if (!record) {
     return { record: null, diagnostics };
@@ -409,10 +393,11 @@ async function lookupVehicle(query, options = {}) {
 
   const enriched = await enrichCompanies(record);
   const withInspectionState = await attachInspectionState(enriched, options);
+  const withOwnershipState = await attachOwnershipState(withInspectionState, options);
   const shouldAttachRegistryState = !FAST_LOOKUP_MODE || lookup.type === "vin";
   const withRegistryState = shouldAttachRegistryState
-    ? await attachPublicRegistryState(withInspectionState)
-    : withInspectionState;
+    ? await attachPublicRegistryState(withOwnershipState)
+    : withOwnershipState;
   const sanitized = sanitizeClientRecord(withRegistryState);
   return {
     diagnostics,
@@ -2184,6 +2169,184 @@ async function attachInspectionState(record, options = {}) {
   return nextRecord;
 }
 
+async function attachOwnershipState(record, options = {}) {
+  if (!record || typeof record !== "object") {
+    return record;
+  }
+
+  await ensureOpenDataPersistentCachesLoaded();
+
+  const parties = Array.isArray(record.ownership?.parties) ? record.ownership.parties : [];
+  const hasConcreteParties = parties.some((party) => party && (party.name || party.ico));
+  const vin = normalizeWhitespace(extractIdentifier(record, "VIN")).toUpperCase() || null;
+  const knownPcv = normalizeWhitespace(extractIdentifier(record, "PČV")) || null;
+  const cachedPcv = knownPcv || (vin ? getPersistentPcv(vin) : null);
+  let nextRecord = cachedPcv ? injectPcvIntoRecord(record, cachedPcv) : record;
+  const cachedOwnership = cachedPcv ? getPersistentOwnership(cachedPcv) : null;
+
+  if (hasConcreteParties) {
+    nextRecord.ownershipLookup = buildOwnershipLookupState("ready", vin, cachedPcv, record.ownership || null);
+    return nextRecord;
+  }
+
+  if (cachedOwnership) {
+    nextRecord = mergeRecords(nextRecord, cachedOwnership) || nextRecord;
+    nextRecord.ownershipLookup = buildOwnershipLookupState("ready", vin, cachedPcv, cachedOwnership.ownership || null);
+    return nextRecord;
+  }
+
+  if (options.includeOwnership) {
+    const hydrated = await hydrateOwnershipData({ vin, pcv: cachedPcv, record: nextRecord });
+    if (hydrated) {
+      nextRecord = mergeRecords(nextRecord, hydrated) || nextRecord;
+      nextRecord.ownershipLookup = buildOwnershipLookupState("ready", vin, hydrated.pcv || cachedPcv, hydrated.ownership || null);
+      return nextRecord;
+    }
+  }
+
+  if (vin || cachedPcv) {
+    scheduleOwnershipHydration({ vin, pcv: cachedPcv, record: nextRecord });
+    nextRecord.ownershipLookup = buildOwnershipLookupState("pending", vin, cachedPcv, null);
+    return nextRecord;
+  }
+
+  nextRecord.ownershipLookup = buildOwnershipLookupState("unavailable", vin, cachedPcv, null);
+  return nextRecord;
+}
+
+function buildOwnershipLookupState(status, vin, pcv, ownership) {
+  return {
+    status,
+    vin: vin || null,
+    pcv: pcv || null,
+    ownership: status === "ready" ? ownership : null,
+    resolvedAt: new Date().toISOString()
+  };
+}
+
+async function lookupVehicleOwnership(params = {}) {
+  await ensureOpenDataPersistentCachesLoaded();
+
+  const queryLookup = params.query ? parseLookupQuery(params.query) : null;
+  const vin =
+    normalizeWhitespace(params.vin || (queryLookup?.type === "vin" ? queryLookup.compact : "")).toUpperCase() ||
+    null;
+  const providedPcv = normalizeWhitespace(params.pcv) || null;
+  const resolvedPcv = providedPcv || (vin ? getPersistentPcv(vin) : null);
+  const cachedOwnership = resolvedPcv ? getPersistentOwnership(resolvedPcv) : null;
+
+  if (cachedOwnership) {
+    return buildOwnershipLookupState("ready", vin, resolvedPcv, cachedOwnership.ownership || null);
+  }
+
+  if (vin || resolvedPcv) {
+    scheduleOwnershipHydration({ vin, pcv: resolvedPcv, record: null });
+    return buildOwnershipLookupState("pending", vin, resolvedPcv, null);
+  }
+
+  return buildOwnershipLookupState("unavailable", vin, resolvedPcv, null);
+}
+
+function scheduleOwnershipHydration({ vin, pcv, record }) {
+  const normalizedVin = normalizeWhitespace(vin).toUpperCase() || null;
+  const normalizedPcv = normalizeWhitespace(pcv) || null;
+  const jobKey = normalizedPcv || normalizedVin;
+
+  if (!jobKey || OPEN_DATA_OWNER_JOBS.has(jobKey)) {
+    return;
+  }
+
+  const job = hydrateOwnershipData({ vin: normalizedVin, pcv: normalizedPcv, record })
+    .catch(() => null)
+    .finally(() => {
+      OPEN_DATA_OWNER_JOBS.delete(jobKey);
+    });
+
+  OPEN_DATA_OWNER_JOBS.set(jobKey, job);
+}
+
+async function hydrateOwnershipData({ vin, pcv, record }) {
+  await ensureOpenDataPersistentCachesLoaded();
+
+  const normalizedVin = normalizeWhitespace(vin).toUpperCase() || null;
+  let resolvedPcv = normalizeWhitespace(pcv) || null;
+
+  if (!resolvedPcv && normalizedVin) {
+    resolvedPcv = getPersistentPcv(normalizedVin);
+  }
+
+  if (!resolvedPcv && normalizedVin) {
+    resolvedPcv = await resolvePcvForVin(normalizedVin).catch(() => null);
+    if (resolvedPcv) {
+      await storePersistentPcv(normalizedVin, resolvedPcv);
+    }
+  }
+
+  if (!resolvedPcv) {
+    return null;
+  }
+
+  const cachedOwnership = getPersistentOwnership(resolvedPcv);
+  if (cachedOwnership) {
+    return cachedOwnership;
+  }
+
+  const dataset = await ensureOpenDataDatasetLocal("owners", OPEN_DATA_OWNER_ROUTE);
+  const relations = await findOpenDataRowsByPcv(dataset.localPath, resolvedPcv, normalizeCompanyVehicleRelation);
+  const ownershipRecord = buildOwnershipRecordFromRelations(relations, record, normalizedVin, resolvedPcv);
+
+  if (!ownershipRecord) {
+    return null;
+  }
+
+  await storePersistentOwnership(resolvedPcv, ownershipRecord);
+  return ownershipRecord;
+}
+
+function buildOwnershipRecordFromRelations(relations, record, vin, pcv) {
+  const parties = (Array.isArray(relations) ? relations : [])
+    .filter((relation) => relation?.current)
+    .map((relation) => ({
+      role: relation.relation || "Subjekt",
+      type: relation.ico ? "company" : normalizeWhitespace(relation.subjectType).toLowerCase().includes("fyz") ? "person" : "unknown",
+      name: relation.name || (relation.ico ? null : "Fyzicka osoba"),
+      ico: relation.ico || null,
+      address: relation.address || null,
+      period: [relation.dateFrom ? formatDate(relation.dateFrom) : null, relation.dateTo ? formatDate(relation.dateTo) : "-"]
+        .filter(Boolean)
+        .join(" - "),
+      since: relation.dateFrom ? formatDate(relation.dateFrom) : null
+    }))
+    .filter((party) => party.name || party.ico);
+
+  if (parties.length === 0) {
+    return null;
+  }
+
+  return {
+    source: {
+      mode: "live",
+      label: "RSV vlastnici/provozovatele",
+      note: "Pravnicke osoby jsou doplnene z otevrene sady vlastnik/provozovatel vozidla."
+    },
+    hero: {
+      badge: parties.some((party) => party.type === "company") ? "Pravnicka osoba" : record?.hero?.badge || "Bez rozliseni",
+      title: record?.hero?.title || `Vozidlo ${vin || pcv || ""}`.trim(),
+      subtitle: record?.hero?.subtitle || "Historie vlastniku a provozovatelu z otevrenych dat.",
+      status: record?.hero?.status || "Neuvedeno"
+    },
+    highlights: [],
+    ownership: {
+      ownerCount: countRole(parties, "vlast") || null,
+      operatorCount: countRole(parties, "provoz") || null,
+      note: "U fyzickych osob se identita obvykle nezobrazuje.",
+      parties
+    },
+    sections: [],
+    timeline: []
+  };
+}
+
 function resolvePvzpBrowserInfo() {
   const explicitPath = normalizeWhitespace(process.env.PVZP_BROWSER_PATH || "");
   if (explicitPath) {
@@ -2716,9 +2879,10 @@ async function ensureOpenDataPersistentCachesLoaded() {
   }
 
   await fs.promises.mkdir(OPEN_DATA_PERSIST_DIR, { recursive: true });
-  const [pcvRaw, inspectionRaw, datasetRaw] = await Promise.all([
+  const [pcvRaw, inspectionRaw, ownershipRaw, datasetRaw] = await Promise.all([
     readJsonFile(OPEN_DATA_PCV_FILE),
     readJsonFile(OPEN_DATA_INSPECTION_FILE),
+    readJsonFile(OPEN_DATA_OWNERSHIP_FILE),
     readJsonFile(OPEN_DATA_DATASET_FILE)
   ]);
 
@@ -2731,6 +2895,12 @@ async function ensureOpenDataPersistentCachesLoaded() {
   Object.entries(inspectionRaw || {}).forEach(([pcv, payload]) => {
     if (pcv && payload) {
       OPEN_DATA_PERSISTENT_INSPECTION_INDEX.set(pcv, payload);
+    }
+  });
+
+  Object.entries(ownershipRaw || {}).forEach(([pcv, payload]) => {
+    if (pcv && payload) {
+      OPEN_DATA_PERSISTENT_OWNER_INDEX.set(pcv, payload);
     }
   });
 
@@ -2974,6 +3144,17 @@ function getPersistentInspections(pcv) {
   return value ? clone(value) : null;
 }
 
+function getPersistentOwnership(pcv) {
+  const normalizedPcv = normalizeWhitespace(pcv);
+  const cached = getTimedCacheValue(OPEN_DATA_OWNERSHIP_CACHE, normalizedPcv);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const value = OPEN_DATA_PERSISTENT_OWNER_INDEX.get(normalizedPcv);
+  return value ? clone(value) : null;
+}
+
 async function storePersistentPcv(vin, pcv) {
   const normalizedVin = normalizeWhitespace(vin).toUpperCase();
   const normalizedPcv = normalizeWhitespace(pcv);
@@ -2997,6 +3178,17 @@ async function storePersistentInspections(pcv, payload) {
   await persistOpenDataCacheFiles();
 }
 
+async function storePersistentOwnership(pcv, payload) {
+  const normalizedPcv = normalizeWhitespace(pcv);
+  if (!normalizedPcv || !payload) {
+    return;
+  }
+
+  OPEN_DATA_PERSISTENT_OWNER_INDEX.set(normalizedPcv, clone(payload));
+  setTimedCacheValue(OPEN_DATA_OWNERSHIP_CACHE, normalizedPcv, payload);
+  await persistOpenDataCacheFiles();
+}
+
 async function persistOpenDataCacheFiles() {
   if (openDataPersistPromise) {
     await openDataPersistPromise;
@@ -3004,7 +3196,8 @@ async function persistOpenDataCacheFiles() {
 
   openDataPersistPromise = Promise.all([
     writeJsonFile(OPEN_DATA_PCV_FILE, Object.fromEntries(OPEN_DATA_PERSISTENT_PCV_INDEX)),
-    writeJsonFile(OPEN_DATA_INSPECTION_FILE, Object.fromEntries(OPEN_DATA_PERSISTENT_INSPECTION_INDEX))
+    writeJsonFile(OPEN_DATA_INSPECTION_FILE, Object.fromEntries(OPEN_DATA_PERSISTENT_INSPECTION_INDEX)),
+    writeJsonFile(OPEN_DATA_OWNERSHIP_FILE, Object.fromEntries(OPEN_DATA_PERSISTENT_OWNER_INDEX))
   ]).finally(() => {
     openDataPersistPromise = null;
   });
@@ -4849,6 +5042,7 @@ module.exports = {
   getLookupRuntimeStatus,
   lookupVehicle,
   lookupVehiclesByIco,
+  lookupVehicleOwnership,
   lookupVehicleInspections,
   describeLookupFailure
 };

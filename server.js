@@ -40,6 +40,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (requestUrl.pathname === "/api/lookup/ownership") {
+      await handleOwnershipLookup(requestUrl, res);
+      return;
+    }
+
     if (requestUrl.pathname === "/api/company-fleet") {
       await handleCompanyFleetLookup(requestUrl, res);
       return;
@@ -170,6 +175,30 @@ async function serveStatic(requestPath, res) {
     }
 
     sendText(res, 500, "Nepodarilo se nacist soubor.");
+  }
+}
+
+async function handleOwnershipLookup(requestUrl, res) {
+  const query = (requestUrl.searchParams.get("query") || "").trim();
+  const vin = (requestUrl.searchParams.get("vin") || "").trim();
+  const pcv = (requestUrl.searchParams.get("pcv") || "").trim();
+
+  if (!query && !vin && !pcv) {
+    sendJson(res, 400, {
+      message: "Zadejte VIN, PČV nebo query."
+    });
+    return;
+  }
+
+  try {
+    const { lookupVehicleOwnership } = getVehicleService();
+    const result = await lookupVehicleOwnership({ query, vin, pcv });
+    sendJson(res, result.status === "ready" ? 200 : result.status === "pending" ? 202 : 404, result);
+  } catch (error) {
+    sendJson(res, 502, {
+      message: "Nepodarilo se nacist vlastniky a provozovatele.",
+      detail: error.message
+    });
   }
 }
 
