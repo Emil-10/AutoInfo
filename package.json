@@ -5,11 +5,11 @@
   "description": "Moderni stranka pro vyhledani vozidla podle SPZ nebo VIN.",
   "scripts": {
     "build": "vite build",
-    "build:fleet-db": "node scripts/build-fleet-db.js",
     "dev": "node server.js",
     "frontend:dev": "vite",
     "postinstall": "node node_modules/playwright-core/cli.js install chromium",
-    "start": "node server.js"
+    "start": "node server.js",
+    "test:error-copy": "node scripts/check-public-error-copy.js"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.2.4",
@@ -18,6 +18,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.0.1",
+    "pg": "^8.20.0",
     "playwright-core": "^1.39.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

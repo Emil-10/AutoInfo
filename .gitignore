@@ -6,3 +6,9 @@ dist/
 server.out.log
 server.err.log
 result-preview.png
+.codex-app*.log
+.playwright-mcp/
+.venv-alpr/
+local-alpr*.log
+__pycache__/
+*.pyc
