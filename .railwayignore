@@ -1,0 +1,13 @@
+.cache/
+.codex-remote-attachments/
+.playwright-mcp/
+.venv-alpr/
+dist/
+node_modules/
+output/
+*.log
+*.err.log
+*.out.log
+*.png
+eng.traineddata
+.env

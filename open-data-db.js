@@ -783,16 +783,16 @@ async function queryPcvByVin(vin) {
   }
 
   return await withOptionalClient(async (client) => {
-    const active = await getActiveDatasetVersion("vehicles", client);
-    if (!active) {
-      return null;
-    }
-
     const result = await client.query(
       `
-        select pcv from vehicle_vins where vin = $1
-        union
-        select pcv from vehicles where ${sqlNormalizedVin("vin")} = $1
+        select pcv
+        from (
+          select pcv, 1 as priority from vehicle_vins where vin = $1
+          union all
+          select pcv, 2 as priority from vehicles where ${sqlNormalizedVin("vin")} = $1
+        ) matches
+        where pcv is not null and btrim(pcv) <> ''
+        order by priority
         limit 1
       `,
       [normalizedVin]
@@ -880,17 +880,47 @@ async function queryOwnershipByPcv(pcv) {
 
 	    const result = await client.query(
 	      `
-	        with all_relations as (
-	          select pcv, ico, name, address, relation, subject_type, current, date_from, date_to,
-	            dataset_filename, dataset_date, id::text as row_id
-	          from ownership_relations
-	          where pcv = $1
-	          union all
-	          select pcv, ico, name, address, relation, 'supplemental' as subject_type, current,
-	            date_from, date_to, source as dataset_filename, null::date as dataset_date, id::text as row_id
-	          from supplemental_ownership_relations
-	          where pcv = $1
-	        )
+        with official_relations as (
+          select o.pcv, coalesce(nullif(o.ico, ''), s.ico) as ico, o.name,
+            coalesce(nullif(o.address, ''), s.address) as address, o.relation, o.subject_type,
+            o.current, o.date_from, o.date_to, o.dataset_filename, o.dataset_date, o.id::text as row_id
+          from ownership_relations o
+          left join lateral (
+            select supplemental.ico, supplemental.address
+            from supplemental_ownership_relations supplemental
+            where supplemental.pcv = o.pcv
+              and coalesce(supplemental.relation, '') = coalesce(o.relation, '')
+              and lower(btrim(coalesce(supplemental.name, ''))) = lower(btrim(coalesce(o.name, '')))
+              and coalesce(supplemental.current, false) = coalesce(o.current, false)
+              and coalesce(supplemental.date_from, date '0001-01-01') = coalesce(o.date_from, date '0001-01-01')
+              and coalesce(supplemental.date_to, date '9999-12-31') = coalesce(o.date_to, date '9999-12-31')
+            order by supplemental.observed_at desc nulls last, supplemental.id desc
+            limit 1
+          ) s on true
+          where o.pcv = $1
+        ),
+        all_relations as (
+          select pcv, ico, name, address, relation, subject_type, current, date_from, date_to,
+            dataset_filename, dataset_date, row_id
+          from official_relations
+          union all
+          select supplemental.pcv, supplemental.ico, supplemental.name, supplemental.address,
+            supplemental.relation, 'supplemental' as subject_type, supplemental.current,
+            supplemental.date_from, supplemental.date_to, supplemental.source as dataset_filename,
+            null::date as dataset_date, supplemental.id::text as row_id
+          from supplemental_ownership_relations supplemental
+          where supplemental.pcv = $1
+            and not exists (
+              select 1
+              from official_relations official
+              where official.pcv = supplemental.pcv
+                and coalesce(official.relation, '') = coalesce(supplemental.relation, '')
+                and lower(btrim(coalesce(official.name, ''))) = lower(btrim(coalesce(supplemental.name, '')))
+                and coalesce(official.current, false) = coalesce(supplemental.current, false)
+                and coalesce(official.date_from, date '0001-01-01') = coalesce(supplemental.date_from, date '0001-01-01')
+                and coalesce(official.date_to, date '9999-12-31') = coalesce(supplemental.date_to, date '9999-12-31')
+            )
+        )
 	        select pcv, ico, name, address, relation, subject_type, current, date_from, date_to,
 	          dataset_filename, dataset_date
 	        from all_relations
