@@ -4,3 +4,9 @@ node_modules
 dist
 .env
 npm-debug.log*
+.venv-alpr
+.playwright-mcp
+output
+*.log
+*.png
+eng.traineddata

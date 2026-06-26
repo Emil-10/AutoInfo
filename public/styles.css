@@ -80,9 +80,9 @@ body.has-results .search-stage {
 .mode-switch {
   position: relative;
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   align-items: center;
-  width: 200px;
+  width: 270px;
   margin: 0 auto;
   padding: 4px;
   border: 1px solid var(--line);
@@ -94,7 +94,7 @@ body.has-results .search-stage {
   position: absolute;
   top: 4px;
   left: 4px;
-  width: calc(50% - 4px);
+  width: calc(33.333% - 4px);
   height: calc(100% - 8px);
   border-radius: 999px;
   background: #f3f3f3;
@@ -103,6 +103,10 @@ body.has-results .search-stage {
 
 .mode-switch[data-mode="vin"] .mode-pill {
   transform: translateX(100%);
+}
+
+.mode-switch[data-mode="ico"] .mode-pill {
+  transform: translateX(200%);
 }
 
 .mode-option {
@@ -117,7 +121,8 @@ body.has-results .search-stage {
 }
 
 .mode-switch[data-mode="plate"] [data-type="plate"],
-.mode-switch[data-mode="vin"] [data-type="vin"] {
+.mode-switch[data-mode="vin"] [data-type="vin"],
+.mode-switch[data-mode="ico"] [data-type="ico"] {
   color: #0a0a0a;
 }
 
