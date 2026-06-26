@@ -3,10 +3,10 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Info Exleasing | VIN / SPZ</title>
+    <title>Info Exleasing | VIN / SPZ / IČO</title>
     <meta
       name="description"
-      content="Minimalisticke tmave vyhledavani vozidel podle VIN nebo SPZ."
+      content="Minimalistické tmavé vyhledávání vozidel podle VIN, SPZ nebo firemního IČO."
     />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -21,13 +21,14 @@
       <div class="brand">info.exleasing.cz</div>
 
       <form id="lookup-form" class="lookup-shell" novalidate>
-        <div class="mode-switch" id="mode-switch" data-mode="plate" aria-label="Typ hledani">
+        <div class="mode-switch" id="mode-switch" data-mode="plate" aria-label="Typ hledání">
           <div class="mode-pill" id="mode-pill"></div>
           <span class="mode-option" data-type="plate">SPZ</span>
           <span class="mode-option" data-type="vin">VIN</span>
+          <span class="mode-option" data-type="ico">IČO</span>
         </div>
 
-        <label class="sr-only" for="vehicle-query">SPZ nebo VIN</label>
+        <label class="sr-only" for="vehicle-query">SPZ, VIN nebo IČO</label>
         <div class="search-box">
           <input
             id="vehicle-query"
@@ -35,14 +36,14 @@
             type="text"
             inputmode="text"
             autocomplete="off"
-            placeholder="Zadej SPZ nebo 17mistny VIN"
+            placeholder="Zadej SPZ, 17místný VIN nebo IČO"
             maxlength="24"
           />
           <button type="submit" aria-label="Vyhledat">Hledat</button>
         </div>
 
         <p class="search-meta" id="search-status">
-          17 znaku automaticky prepne na VIN. Jinak zustava SPZ.
+          17 znaků automaticky přepne na VIN, platné osmimístné číslo na IČO.
         </p>
       </form>
     </main>

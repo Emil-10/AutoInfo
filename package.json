@@ -6,10 +6,28 @@
   "scripts": {
     "build": "vite build",
     "build:fleet-db": "node scripts/build-fleet-db.js",
+    "cron:open-data": "node scripts/import-open-data-postgres.js",
+    "db:activate-staging": "node scripts/activate-open-data-staging.js",
+    "db:audit-storage": "node scripts/audit-open-data-storage.js",
+    "db:cleanup-import": "node scripts/cleanup-open-data-import.js",
+    "db:index-company-names": "node scripts/create-open-data-name-indexes.js",
+    "db:migrate": "node scripts/migrate-open-data-db.js",
+    "db:backfill-plates": "node scripts/backfill-missing-plates.js",
+    "db:import-plates": "node scripts/import-vehicle-plates.js",
+    "db:missing-plates": "node scripts/export-missing-plate-template.js",
+    "db:prune-cache": "node scripts/prune-open-data-cache.js",
+    "db:status": "node scripts/check-open-data-db.js",
     "dev": "node server.js",
+    "benchmark:endpoints": "node scripts/benchmark-endpoints.js",
     "frontend:dev": "vite",
+    "alpr:local": "python scripts/local-alpr-server.py",
+    "import:open-data": "node scripts/import-open-data-postgres.js",
+    "import:open-data:full": "node scripts/import-open-data-postgres.js --profile=full-local --sources=all",
     "postinstall": "node node_modules/playwright-core/cli.js install chromium",
-    "start": "node server.js"
+    "start": "node scripts/start.js",
+    "test:error-copy": "node scripts/check-public-error-copy.js",
+    "test:e2e:ico": "node scripts/e2e-ico-fleet.js",
+    "test:e2e:spz-ico": "node scripts/e2e-ico-fleet.js"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.2.4",
@@ -18,10 +36,13 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.0.1",
+    "pg": "^8.20.0",
+    "pg-copy-streams": "^7.0.0",
     "playwright-core": "^1.39.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "tailwind-merge": "^3.5.0"
+    "tailwind-merge": "^3.5.0",
+    "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.1",

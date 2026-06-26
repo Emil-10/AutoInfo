@@ -23,13 +23,13 @@ async function handleSubmit(event) {
   const query = input.value.trim();
 
   if (!query) {
-    setStatus("Zadej SPZ nebo VIN.", "warning");
+    setStatus("Zadej SPZ, VIN nebo IČO.", "warning");
     input.focus();
     return;
   }
 
   renderLoading();
-  setStatus("Nacitam data...", "loading");
+  setStatus("Načítám data...", "loading");
 
   try {
     const response = await fetch(`/api/lookup?query=${encodeURIComponent(query)}`, {
@@ -47,7 +47,7 @@ async function handleSubmit(event) {
   } catch (error) {
     document.body.classList.add("has-results");
     renderError(query, error.message);
-    setStatus("Bez vysledku", "warning");
+    setStatus("Bez výsledků", "warning");
   }
 }
 
@@ -61,6 +61,10 @@ function detectInputType(value) {
     .toUpperCase()
     .replace(/[^A-Z0-9]/g, "");
 
+  if (/^\d{8}$/.test(compact) && isValidIco(compact)) {
+    return "ico";
+  }
+
   if (/^[A-HJ-NPR-Z0-9]{17}$/.test(compact)) {
     return "vin";
   }
@@ -73,7 +77,7 @@ function renderLoading() {
   highlightsGrid.hidden = true;
   resultSections.hidden = true;
   timelineCard.hidden = true;
-  resultSource.textContent = "Vyhledavani";
+  resultSource.textContent = "Vyhledávání";
   resultQuery.textContent = "";
   resultSummary.innerHTML = "";
   highlightsGrid.innerHTML = "";
@@ -84,6 +88,11 @@ function renderLoading() {
 }
 
 function renderResult(payload) {
+  if (payload.kind === "fleet") {
+    renderFleetResult(payload);
+    return;
+  }
+
   results.hidden = false;
   resultSource.textContent = payload.source?.label || "Zdroj";
   resultQuery.textContent = renderQueryLabel(payload.query);
@@ -91,7 +100,7 @@ function renderResult(payload) {
     <div class="summary-head">
       <div>
         <div class="summary-badge">${escapeHtml(payload.hero?.badge || "Vozidlo")}</div>
-        <h1>${escapeHtml(payload.hero?.title || "Bez nazvu")}</h1>
+        <h1>${escapeHtml(payload.hero?.title || "Bez názvu")}</h1>
       </div>
       <div class="summary-state">${escapeHtml(payload.hero?.status || "Neuvedeno")}</div>
     </div>
@@ -122,6 +131,80 @@ function renderResult(payload) {
   timelineCard.hidden = timelineCard.innerHTML === "";
 }
 
+function renderFleetResult(payload) {
+  const records = Array.isArray(payload.records) ? payload.records : [];
+  const company = payload.company || {};
+  const summary = payload.summary || {};
+  const companyName = company.name || `Firma ${company.ico || payload.query?.normalized || ""}`.trim();
+
+  results.hidden = false;
+  resultSource.textContent = "Otevřená data RSV";
+  resultQuery.textContent = renderQueryLabel(payload.query);
+  resultSummary.innerHTML = `
+    <div class="summary-head">
+      <div>
+        <div class="summary-badge">Právnická osoba</div>
+        <h1>${escapeHtml(companyName || "Firma")}</h1>
+      </div>
+      <div class="summary-state">IČO ${escapeHtml(company.ico || payload.query?.normalized || "-")}</div>
+    </div>
+    <p class="summary-text">${escapeHtml(payload.message || "Aktuálně vlastněná nebo provozovaná vozidla podle otevřených dat Registru silničních vozidel.")}</p>
+    ${
+      summary.truncated
+        ? `<p class="summary-note">Výsledek byl zkrácen na prvních ${escapeHtml(String(summary.displayedCount || records.length))} vozidel.</p>`
+        : ""
+    }
+  `;
+
+  highlightsGrid.innerHTML = [
+    { label: "Vozidla", value: summary.vehicleCount ?? records.length },
+    { label: "Aktuální", value: summary.currentVehicleCount ?? records.length },
+    { label: "Vztahy", value: summary.relationshipCount ?? "-" },
+    { label: "Zobrazeno", value: summary.displayedCount ?? records.length }
+  ]
+    .map(
+      (item) => `
+        <article class="metric-card">
+          <span>${escapeHtml(item.label)}</span>
+          <strong>${escapeHtml(item.value)}</strong>
+        </article>
+      `
+    )
+    .join("");
+  highlightsGrid.hidden = false;
+
+  ownershipCard.innerHTML = `
+    <p class="section-label">Firma</p>
+    <p class="card-note">IČO ${escapeHtml(company.ico || payload.query?.normalized || "-")}</p>
+    ${company.address ? `<p class="card-note">${escapeHtml(company.address)}</p>` : ""}
+  `;
+
+  detailsStack.innerHTML = records.length
+    ? records
+        .map((record) => {
+          const title = [record.make, record.model, record.type].filter(Boolean).join(" ").trim() || record.vin || record.pcv || "Vozidlo";
+          const detail = [
+            record.category,
+            record.fuel,
+            record.firstRegistration ? `1. registrace ${formatTimelineDate(record.firstRegistration)}` : null,
+            record.status
+          ].filter(Boolean).join(" - ");
+          return `
+            <article class="party-card">
+              <div class="party-role">${escapeHtml(record.current ? "Aktuální vztah" : "Vozidlo")}</div>
+              <div class="party-name">${escapeHtml(title)}</div>
+              <p class="card-note">VIN ${escapeHtml(record.vin || "-")} - PCV ${escapeHtml(record.pcv || "-")}</p>
+              ${detail ? `<p class="card-note">${escapeHtml(detail)}</p>` : ""}
+            </article>
+          `;
+        })
+        .join("")
+    : `<article class="party-card"><p class="card-note">${escapeHtml(payload.message || "Pro zadané IČO nebyla nalezena žádná aktivní vozidla.")}</p></article>`;
+  resultSections.hidden = false;
+  timelineCard.hidden = true;
+  timelineCard.innerHTML = "";
+}
+
 function renderError(query, message) {
   results.hidden = false;
   highlightsGrid.hidden = true;
@@ -135,8 +218,8 @@ function renderError(query, message) {
   resultSummary.innerHTML = `
     <div class="summary-head">
       <div>
-        <div class="summary-badge warning-badge">Bez zaznamu</div>
-        <h1>Pro tento identifikator zatim nic nemam</h1>
+        <div class="summary-badge warning-badge">Bez záznamu</div>
+        <h1>Pro tento identifikátor zatím nic nemám</h1>
       </div>
     </div>
     <p class="summary-text">${escapeHtml(message)}</p>
@@ -156,18 +239,18 @@ function renderOwnership(ownership) {
   }
 
   ownershipCard.innerHTML = `
-    <p class="section-label">Vlastnictvi</p>
+    <p class="section-label">Vlastnictví</p>
     <div class="ownership-metrics">
       <div class="mini-metric">
-        <span>Vlastnici</span>
+        <span>Vlastníci</span>
         <strong>${escapeHtml(String(ownership.ownerCount ?? "-"))}</strong>
       </div>
       <div class="mini-metric">
-        <span>Provozovatele</span>
+        <span>Provozovatelé</span>
         <strong>${escapeHtml(String(ownership.operatorCount ?? "-"))}</strong>
       </div>
     </div>
-    <p class="card-note">${escapeHtml(ownership.note || "Bez doplnujici poznamky.")}</p>
+    <p class="card-note">${escapeHtml(ownership.note || "Bez doplňující poznámky.")}</p>
     <div class="party-list">
       ${
         parties.length
@@ -176,9 +259,9 @@ function renderOwnership(ownership) {
                 (party) => `
                   <article class="party-card">
                     <div class="party-role">${escapeHtml(party.role || "Subjekt")}</div>
-                    <div class="party-name">${escapeHtml(party.name || "Bez nazvu")}</div>
+                    <div class="party-name">${escapeHtml(party.name || "Bez názvu")}</div>
                     <p class="card-note">
-                      ${party.ico ? `ICO ${escapeHtml(party.ico)}` : "Bez verejneho ICO"}
+                      ${party.ico ? `IČO ${escapeHtml(party.ico)}` : "Bez veřejného IČO"}
                       ${party.address ? ` • ${escapeHtml(party.address)}` : ""}
                       ${party.since ? ` • od ${escapeHtml(party.since)}` : ""}
                     </p>
@@ -186,7 +269,7 @@ function renderOwnership(ownership) {
                 `
               )
               .join("")
-          : `<article class="party-card"><p class="card-note">Zdroj nevratil seznam subjektu.</p></article>`
+          : `<article class="party-card"><p class="card-note">Zdroj nevrátil seznam subjektů.</p></article>`
       }
     </div>
   `;
@@ -236,7 +319,7 @@ function renderTimeline(entries) {
             <article class="timeline-item">
               <span>${escapeHtml(formatTimelineDate(entry.date))}</span>
               <div>
-                <strong>${escapeHtml(entry.title || "Udalost")}</strong>
+                <strong>${escapeHtml(entry.title || "Událost")}</strong>
                 <p>${escapeHtml(entry.description || "")}</p>
               </div>
             </article>
@@ -252,26 +335,80 @@ function renderQueryLabel(query) {
     return "";
   }
 
-  const type = query.type === "vin" ? "VIN" : "SPZ";
+  const type = query.type === "vin" ? "VIN" : query.type === "ico" ? "IČO" : "SPZ";
   return `${type}: ${query.raw || query.normalized || ""}`;
+}
+
+function isValidIco(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (!/^\d{8}$/.test(digits)) {
+    return false;
+  }
+
+  let control = 11 - [8, 7, 6, 5, 4, 3, 2].reduce((sum, weight, index) => {
+    return sum + Number(digits[index]) * weight;
+  }, 0) % 11;
+  if (control === 10) {
+    control = 0;
+  } else if (control === 11) {
+    control = 1;
+  }
+
+  return control === Number(digits[7]);
 }
 
 function composeErrorMessage(payload) {
   if (!payload) {
-    return "Neznama chyba pri vyhledavani.";
+    return "Neznámá chyba při vyhledávání.";
   }
 
-  const lines = [payload.message || "Vyhledavani selhalo."];
+  const lines = [payload.message || "Vyhledávání selhalo."];
 
   if (Array.isArray(payload.hints) && payload.hints.length) {
-    lines.push(payload.hints.join(" "));
+    lines.push(payload.hints.map(sanitizeLookupErrorText).filter(Boolean).join(" "));
   }
 
-  if (payload.detail) {
-    lines.push(payload.detail);
+  const detail = sanitizeLookupErrorText(payload.detail);
+  if (detail && !isInternalLookupErrorDetail(detail)) {
+    lines.push(detail);
   }
 
-  return lines.join(" ");
+  return sanitizeLookupErrorText(lines.join(" "));
+}
+
+function sanitizeLookupErrorText(value) {
+  const text = String(value || "");
+  if (!text) {
+    return "";
+  }
+
+  const internalProvider = ["P", "V", "Z", "P"].join("");
+  const secondaryProvider = ["U", "N", "I", "Q", "A"].join("");
+  return text
+    .replace(new RegExp(`\\b${internalProvider}\\b`, "gi"), "externí zdroj")
+    .replace(new RegExp(`\\b${secondaryProvider}\\b`, "gi"), "externí zdroj")
+    .replace(/\bTRANSPORT_CUBE_LOOKUP_URL\b/g, "primární zdroj")
+    .replace(/\bbrowserType\.launch:[^.;]*(?:[.;]|$)/gi, "")
+    .replace(/\bEPERM:[^.;]*(?:[.;]|$)/gi, "")
+    .replace(/\bmkdtemp\s+'[^']*'/gi, "")
+    .replace(/\bconnect\s+(?:ECONNREFUSED|EACCES|ETIMEDOUT)\s+[^\s.;]+/gi, "zdroj je dočasně nedostupný")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isInternalLookupErrorDetail(value) {
+  const normalized = String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+  return [
+    "browsertype launch",
+    "mkdtemp",
+    "eperm",
+    "transport cube",
+    "pvzp",
+    "uniqa"
+  ].some((marker) => normalized.includes(marker));
 }
 
 function setStatus(text, mode) {
