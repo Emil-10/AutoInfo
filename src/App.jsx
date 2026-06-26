@@ -621,9 +621,7 @@ export default function App() {
           <section className="mx-auto w-full max-w-6xl">
           {loading ? <LoadingState /> : null}
           {!loading && error ? <ErrorState message={error} type={detectedType} query={query} /> : null}
-          {!loading && !error && result ? (
-            result.kind === "fleet" ? <CompanyFleetState onVehicleVinLookup={handleVehicleVinLookup} result={result} /> : <ResultState result={result} />
-          ) : null}
+          {!loading && !error && result ? <ResultState result={result} /> : null}
         </section>
       )}
       </main>
@@ -696,7 +694,7 @@ function StickyHeader({ loading, result }) {
 
         <nav aria-label="Sekce reportu" className="flex min-w-0 flex-wrap items-center gap-2">
           <HeaderAnchor href="#search" icon={Search} label="Hledat" />
-          {result ? <HeaderAnchor href="#summary" icon={FileText} label={result.kind === "fleet" ? "Flotila" : "Souhrn"} /> : null}
+          {result ? <HeaderAnchor href="#summary" icon={FileText} label="Souhrn" /> : null}
           {hasVehicleResult ? <HeaderAnchor href="#inspection" icon={Gauge} label="STK" /> : null}
           {hasVehicleResult ? <HeaderAnchor href="#vignette" icon={CheckCircle2} label="Znamka" /> : null}
           {dimensions ? <HeaderAnchor href="#dimensions" icon={CarFront} label="Rozmery" /> : null}
