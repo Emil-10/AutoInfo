@@ -4704,6 +4704,7 @@ function collectIstpCandidateDates(inspections, record) {
   };
 
   const addValidityCandidates = (validUntil) => {
+    addDateWindow(validUntil, [0, -1, -3, -7, -14, -30, 1, 3]);
     addDate(subtractYearsFromDate(validUntil, 2));
     addDate(subtractYearsFromDate(validUntil, 4));
   };
@@ -4713,8 +4714,8 @@ function collectIstpCandidateDates(inspections, record) {
   };
 
   (Array.isArray(inspections?.records) ? inspections.records : []).forEach((inspection) => {
-    addDate(inspection?.validFrom || inspection?.performedOn);
     addValidityCandidates(inspection?.validUntil);
+    addDate(inspection?.validFrom || inspection?.performedOn);
   });
 
   // ponytail: import evidence checks usually sit right before Czech registration; widen only that date.
@@ -5766,13 +5767,25 @@ async function attachInspectionState(record, options = {}) {
   }
   let nextRecord = cachedPcv ? injectPcvIntoRecord(record, cachedPcv) : record;
   const cachedInspections = cachedPcv ? getPersistentInspections(cachedPcv) : null;
+  let inspectionHintRecordPromise = null;
+  const getInspectionHintRecord = () => {
+    if (!vin) {
+      return Promise.resolve(nextRecord);
+    }
+    if (!inspectionHintRecordPromise) {
+      inspectionHintRecordPromise = buildInspectionHintRecord(vin, cachedPcv)
+        .then((hint) => mergeSupplementalRecord(nextRecord, hint));
+    }
+    return inspectionHintRecordPromise;
+  };
 
   if (cachedPcv) {
+    const inspectionHintRecord = await getInspectionHintRecord();
     const databaseInspections = withResolvedInspectionPcv(
       await enrichInspectionsWithMileage(
         await lookupInspectionsFromDatabaseByPcv(cachedPcv).catch(() => null),
         vin,
-        nextRecord
+        inspectionHintRecord
       ),
       cachedPcv
     );
@@ -5785,8 +5798,9 @@ async function attachInspectionState(record, options = {}) {
   }
 
   if (cachedInspections) {
+    const inspectionHintRecord = await getInspectionHintRecord();
     const enrichedCachedInspections = withResolvedInspectionPcv(
-      await enrichInspectionsWithMileage(cachedInspections, vin, nextRecord),
+      await enrichInspectionsWithMileage(cachedInspections, vin, inspectionHintRecord),
       cachedPcv
     );
     nextRecord = mergeInspectionData(nextRecord, enrichedCachedInspections);
@@ -5809,7 +5823,7 @@ async function attachInspectionState(record, options = {}) {
   }
 
   const vinOnlyInspections = vin
-    ? withResolvedInspectionPcv(await enrichInspectionsWithMileage(null, vin, nextRecord), cachedPcv)
+    ? withResolvedInspectionPcv(await enrichInspectionsWithMileage(null, vin, await getInspectionHintRecord()), cachedPcv)
     : null;
   if (vinOnlyInspections) {
     nextRecord = mergeInspectionData(nextRecord, vinOnlyInspections);
@@ -5818,8 +5832,9 @@ async function attachInspectionState(record, options = {}) {
   }
 
   if (options.includeInspections) {
+    const inspectionHintRecord = await getInspectionHintRecord();
     const hydrated = withResolvedInspectionPcv(
-      await enrichInspectionsWithMileage(await hydrateInspectionData({ vin, pcv: cachedPcv }), vin, nextRecord),
+      await enrichInspectionsWithMileage(await hydrateInspectionData({ vin, pcv: cachedPcv }), vin, inspectionHintRecord),
       cachedPcv
     );
     if (hydrated) {
@@ -6730,6 +6745,23 @@ function mergeRegistryStateIntoRecord(record) {
   return nextRecord;
 }
 
+async function buildInspectionHintRecord(vin, pcv) {
+  const normalizedVin = normalizeWhitespace(vin).toUpperCase() || null;
+  const normalizedPcv = normalizeWhitespace(pcv) || null;
+  if (!normalizedVin && !normalizedPcv) {
+    return null;
+  }
+
+  const officialInspectionHintRecord = normalizedVin
+    ? await lookupFromOfficialVinApiWithBudget({ type: "vin", raw: normalizedVin, compact: normalizedVin }, null, true).catch(() => null)
+    : null;
+  const openDataHintPayload = await queryOpenDataVehicleByIdentifiers({ vin: normalizedVin, pcv: normalizedPcv }).catch(() => null);
+  const openDataHintRecord = openDataHintPayload?.summary
+    ? buildVehicleRecordFromOpenDataSummary(openDataHintPayload.summary, openDataHintPayload)
+    : null;
+  return mergeSupplementalRecord(officialInspectionHintRecord, openDataHintRecord);
+}
+
 async function lookupVehicleInspections(params = {}) {
   await ensureOpenDataPersistentCachesLoaded();
 
@@ -6742,16 +6774,7 @@ async function lookupVehicleInspections(params = {}) {
   if (!resolvedPcv && vin) {
     resolvedPcv = await resolveIndexedPcvForVin(vin);
   }
-  const officialInspectionHintRecord = vin
-    ? await lookupFromOfficialVinApiWithBudget({ type: "vin", raw: vin, compact: vin }, null, true).catch(() => null)
-    : null;
-  const openDataHintPayload = vin || resolvedPcv
-    ? await queryOpenDataVehicleByIdentifiers({ vin, pcv: resolvedPcv }).catch(() => null)
-    : null;
-  const openDataHintRecord = openDataHintPayload?.summary
-    ? buildVehicleRecordFromOpenDataSummary(openDataHintPayload.summary, openDataHintPayload)
-    : null;
-  const inspectionHintRecord = mergeSupplementalRecord(officialInspectionHintRecord, openDataHintRecord);
+  const inspectionHintRecord = await buildInspectionHintRecord(vin, resolvedPcv);
   const cachedInspections = resolvedPcv ? getPersistentInspections(resolvedPcv) : null;
 
   if (resolvedPcv) {

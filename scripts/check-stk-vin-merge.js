@@ -47,6 +47,19 @@ const evidence = result.records.find((record) => record.sourceId === "evidence")
 if (!evidence || evidence.odometer !== 120961) {
   throw new Error("VIN STK merge lost the evidence-check odometer");
 }
+
+const candidateDates = collectIstpCandidateDates({
+  records: [
+    {
+      validFrom: "2023-02-06T00:00:00.000Z",
+      validUntil: "2025-02-06T00:00:00.000Z"
+    }
+  ]
+}, null);
+const firstBatch = candidateDates.slice(0, 8);
+if (!firstBatch.includes("2025-02-06") || !firstBatch.includes("2025-02-05")) {
+  throw new Error("ISTP candidate dates do not check around STK expiry: " + firstBatch.join(","));
+}
 `;
 
 vm.runInNewContext(fs.readFileSync(servicePath, "utf8") + check, {
