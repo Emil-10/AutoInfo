@@ -1026,18 +1026,18 @@ function VehicleDimensionsPanel({ dimensions }) {
         <CardTitle className="text-2xl text-white">Rozměry a hmotnost vozidla</CardTitle>
       </CardHeader>
       <CardContent>
-        <div className="rounded-[1.5rem] border border-white/10 bg-[#101722] p-3 text-slate-100 shadow-soft sm:p-4">
+        <div className="rounded-[1.5rem] border border-emerald-300/15 bg-[#0d1b16] p-3 text-slate-100 shadow-soft sm:p-4">
           <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_300px]">
             <VehicleDimensionsDrawing dimensions={dimensions} />
 
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
-              <div className="rounded-[1.25rem] border border-white/10 bg-[#0c121b] p-3">
+              <div className="rounded-[1.25rem] border border-emerald-300/15 bg-[#08130f] p-3">
                 <VehicleFrontDimensions dimensions={dimensions} />
               </div>
-              <div className="flex min-h-[180px] items-center justify-center rounded-[1.25rem] border border-white/10 bg-[#0c121b] p-5">
-                <WeightIcon className="mr-5 size-16 text-[#8fb4ff]" />
+              <div className="flex min-h-[180px] items-center justify-center rounded-[1.25rem] border border-emerald-300/15 bg-[#08130f] p-5">
+                <WeightIcon className="mr-5 size-16 text-[#6ee7b7]" />
                 <div>
-                  <p className="text-2xl font-semibold text-[#8fb4ff]">Hmotnost</p>
+                  <p className="text-2xl font-semibold text-[#6ee7b7]">Hmotnost</p>
                   <p className="text-4xl font-semibold text-slate-50">{dimensions.weight || "-"}</p>
                 </div>
               </div>
@@ -1093,18 +1093,18 @@ function VehicleFrontSilhouette(props) {
 
 function VehicleDimensionsDrawing({ dimensions }) {
   return (
-    <div className="rounded-[1.25rem] border border-white/10 bg-[#0c121b] p-2">
+    <div className="rounded-[1.25rem] border border-emerald-300/15 bg-[#08130f] p-2">
       <svg className="h-auto w-full" role="img" aria-label="Grafické zobrazení rozměrů vozidla" viewBox="0 0 880 520">
         <defs>
           <marker id="dimension-arrow" markerHeight="7" markerWidth="7" orient="auto" refX="3.5" refY="3.5">
-            <path d="M0 0 7 3.5 0 7Z" fill="#8fb4ff" />
+            <path d="M0 0 7 3.5 0 7Z" fill="#6ee7b7" />
           </marker>
         </defs>
 
-        <rect width="880" height="520" fill="#0c121b" />
+        <rect width="880" height="520" fill="#08130f" />
         <VehicleSideSilhouette x="45" y="120" width="745" height="268" preserveAspectRatio="xMidYMid meet" />
 
-        <g stroke="#8fb4ff" strokeWidth="2.2">
+        <g stroke="#6ee7b7" strokeWidth="2.2">
           <path d="M66 345v142M800 345v142M187 337v92M638 337v92" strokeDasharray="8 9" />
           <path d="M73 468H793" markerEnd="url(#dimension-arrow)" markerStart="url(#dimension-arrow)" />
           <path d="M196 385H630" markerEnd="url(#dimension-arrow)" markerStart="url(#dimension-arrow)" />
@@ -1112,12 +1112,12 @@ function VehicleDimensionsDrawing({ dimensions }) {
           <path d="M768 117h58M768 400h58" strokeDasharray="8 9" />
         </g>
         <g fontFamily="inherit" fontWeight="700">
-          <text fill="#8fb4ff" fontSize="24" textAnchor="middle" x="420" y="437">Rozvor</text>
+          <text fill="#6ee7b7" fontSize="24" textAnchor="middle" x="420" y="437">Rozvor</text>
           <text fill="#f8fafc" fontSize="28" textAnchor="start" x="500" y="437">{dimensions.wheelbase || "-"}</text>
-          <text fill="#8fb4ff" fontSize="24" textAnchor="middle" x="420" y="510">Délka</text>
+          <text fill="#6ee7b7" fontSize="24" textAnchor="middle" x="420" y="510">Délka</text>
           <text fill="#f8fafc" fontSize="28" textAnchor="start" x="496" y="510">{dimensions.length || "-"}</text>
-          <rect fill="#101722" stroke="#263241" height="76" rx="10" width="122" x="738" y="204" />
-          <text fill="#8fb4ff" fontSize="24" x="752" y="236">Výška</text>
+          <rect fill="#0d1b16" stroke="#1f3b31" height="76" rx="10" width="122" x="738" y="204" />
+          <text fill="#6ee7b7" fontSize="24" x="752" y="236">Výška</text>
           <text fill="#f8fafc" fontSize="26" x="752" y="274">{dimensions.height || "-"}</text>
         </g>
       </svg>
@@ -1130,16 +1130,16 @@ function VehicleFrontDimensions({ dimensions }) {
     <svg className="h-auto w-full" role="img" aria-label="Grafické zobrazení šířky vozidla" viewBox="0 0 320 235">
       <defs>
         <marker id="front-dimension-arrow" markerHeight="7" markerWidth="7" orient="auto" refX="3.5" refY="3.5">
-          <path d="M0 0 7 3.5 0 7Z" fill="#8fb4ff" />
+          <path d="M0 0 7 3.5 0 7Z" fill="#6ee7b7" />
         </marker>
       </defs>
-      <rect width="320" height="235" fill="#0c121b" />
+      <rect width="320" height="235" fill="#08130f" />
       <VehicleFrontSilhouette x="55" y="0" width="210" height="210" />
-      <g stroke="#8fb4ff" strokeWidth="2">
+      <g stroke="#6ee7b7" strokeWidth="2">
         <path d="M45 139v70M275 139v70" strokeDasharray="7 8" />
         <path d="M52 198H268" markerEnd="url(#front-dimension-arrow)" markerStart="url(#front-dimension-arrow)" />
       </g>
-      <text fill="#8fb4ff" fontSize="20" fontWeight="700" textAnchor="end" x="160" y="225">Šířka</text>
+      <text fill="#6ee7b7" fontSize="20" fontWeight="700" textAnchor="end" x="160" y="225">Šířka</text>
       <text fill="#f8fafc" fontSize="22" fontWeight="700" x="174" y="225">{dimensions.width || "-"}</text>
     </svg>
   );
