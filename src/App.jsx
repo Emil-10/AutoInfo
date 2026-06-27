@@ -659,7 +659,6 @@ export default function App() {
 
                   <input
                     accept="image/*"
-                    capture="environment"
                     className="hidden"
                     onChange={handlePlateImageChange}
                     ref={plateImageInputRef}
@@ -667,15 +666,15 @@ export default function App() {
                   />
 
                   <Button
-                    aria-label="Vyfotit nebo nahrát SPZ"
-                    className={cn("px-0 sm:w-14", hasSearched ? "h-12" : "h-14")}
+                    aria-label="Nahrát foto SPZ"
+                    className={cn("px-4", hasSearched ? "h-12" : "h-14")}
                     disabled={scanLoading || loading}
                     onClick={() => plateImageInputRef.current?.click()}
                     type="button"
                     variant="outline"
                   >
                     {scanLoading ? <Loader2 className="size-5 animate-spin" /> : <Camera className="size-5" />}
-                    <span className="ml-2 sm:sr-only">Foto SPZ</span>
+                    <span className="ml-2">Nahrát foto SPZ</span>
                   </Button>
 
                   <Button className={cn("rounded-full px-6 sm:px-7", hasSearched ? "h-12" : "h-14")} disabled={scanLoading} size="lg" type="submit">
