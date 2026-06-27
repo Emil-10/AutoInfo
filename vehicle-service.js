@@ -5889,11 +5889,6 @@ async function attachOwnershipState(record, options = {}) {
   let nextRecord = cachedPcv ? injectPcvIntoRecord(record, cachedPcv) : record;
   const cachedOwnership = cachedPcv ? getPersistentOwnership(cachedPcv) : null;
 
-  if (hasConcreteParties) {
-    nextRecord.ownershipLookup = buildOwnershipLookupState("ready", vin, cachedPcv, record.ownership || null);
-    return nextRecord;
-  }
-
   if (cachedPcv) {
     const databaseOwnership = await lookupOwnershipFromDatabaseByPcv(cachedPcv, nextRecord, vin).catch(() => null);
     if (databaseOwnership) {
@@ -5918,6 +5913,11 @@ async function attachOwnershipState(record, options = {}) {
       nextRecord.ownershipLookup = buildOwnershipLookupState("ready", vin, hydrated.pcv || cachedPcv, hydrated.ownership || null);
       return nextRecord;
     }
+  }
+
+  if (hasConcreteParties) {
+    nextRecord.ownershipLookup = buildOwnershipLookupState("ready", vin, cachedPcv, record.ownership || null);
+    return nextRecord;
   }
 
   if (cachedPcv) {
@@ -10755,7 +10755,9 @@ function ensureArray(value) {
 function uniqueParties(parties) {
   const seen = new Set();
   return parties.filter((party) => {
-    const key = [party.role, party.type, party.ico, party.name, party.address].join("|");
+    const dateFrom = party.dateFrom || party.since || extractPeriodStart(party.period);
+    const dateTo = party.dateTo || extractPeriodEnd(party.period);
+    const key = [party.role, party.type, party.ico, party.name, party.address, dateFrom, dateTo].join("|");
     if (seen.has(key)) {
       return false;
     }

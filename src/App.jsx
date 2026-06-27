@@ -35,6 +35,11 @@ const KNOWN_STK_STATION_NAMES = {
   "3114": "Bohdalec"
 };
 
+function withReadyOwnership(payload) {
+  const lookupOwnership = payload?.ownershipLookup?.status === "ready" ? payload.ownershipLookup.ownership : null;
+  return lookupOwnership?.parties?.length ? { ...payload, ownership: lookupOwnership } : payload;
+}
+
 export default function App() {
   const [query, setQuery] = useState("");
   const [result, setResult] = useState(null);
@@ -412,7 +417,7 @@ export default function App() {
     const trimmed = nextQuery.trim();
 
     if (!trimmed) {
-      setStatusText("Nejdřív zadej SPZ, VIN, IČO nebo odkaz.");
+      setStatusText("Nejdřív zadej SPZ, VIN nebo odkaz.");
       setError("");
       setResult(null);
       return;
@@ -429,14 +434,7 @@ export default function App() {
       if (queryType) {
         setSelectedType(queryType);
       }
-      const normalizedIco = trimmed.replace(/\D/g, "");
-      if (queryType === "ico" && (!/^\d{8}$/.test(normalizedIco) || !isValidIco(normalizedIco))) {
-        throw new Error("Zadejte platné osmimístné IČO.");
-      }
-      const endpoint =
-        queryType === "ico"
-          ? `/api/company-fleet?ico=${encodeURIComponent(normalizedIco)}`
-          : buildLookupEndpoint(trimmed, queryType);
+      const endpoint = buildLookupEndpoint(trimmed, queryType);
       const response = await fetch(endpoint, {
         headers: { Accept: "application/json" }
       });
@@ -446,9 +444,10 @@ export default function App() {
         throw new Error(composeErrorMessage(payload));
       }
 
-      setResult(payload);
-      const shareType = payload.query?.type || queryType;
-      const shareValue = payload.query?.raw || payload.query?.normalized || trimmed;
+      const nextPayload = withReadyOwnership(payload);
+      setResult(nextPayload);
+      const shareType = nextPayload.query?.type || queryType;
+      const shareValue = nextPayload.query?.raw || nextPayload.query?.normalized || trimmed;
       const normalizedShareType = normalizeLookupType(shareType);
       if (normalizedShareType) {
         setSelectedType(normalizedShareType);
@@ -461,8 +460,6 @@ export default function App() {
       setStatusText(
         payload.message
           ? payload.message
-          : payload.kind === "fleet"
-          ? "Hotovo. Zobrazuji aktuálně vlastněná nebo provozovaná vozidla firmy."
           : payload.inspectionLookup?.status === "pending"
           ? "Základ je připravený. Technické prohlídky se načítají na pozadí."
           : "Hotovo. Výsledek je připravený."
@@ -509,12 +506,6 @@ export default function App() {
   function handleQueryChange(value) {
     setQuery(value);
     if (isLikelyUrlInput(value)) {
-      return;
-    }
-
-    const compact = String(value || "").replace(/\D/g, "");
-    if (selectedType === "ico" && compact.length <= 8) {
-      setSelectedType("ico");
       return;
     }
 
@@ -596,7 +587,7 @@ export default function App() {
           <Card className="border-white/10 bg-card/80">
             <CardContent className={cn(hasSearched ? "p-3 sm:p-4" : "p-4 sm:p-5")}>
               <div className={cn("flex justify-center", hasSearched ? "mb-3" : "mb-5")}>
-	                <div aria-label="Typ vyhledávání" className="inline-grid w-full max-w-[320px] grid-cols-3 rounded-full border border-border bg-secondary p-1" role="group">
+	                <div aria-label="Typ vyhledávání" className="inline-grid w-full max-w-[240px] grid-cols-2 rounded-full border border-border bg-secondary p-1" role="group">
 	                  <button
 	                    aria-pressed={selectedType === "plate"}
 	                    className={cn(
@@ -620,22 +611,9 @@ export default function App() {
                     )}
                     onClick={() => setSelectedType("vin")}
                     type="button"
-                  >
-                    VIN
-                  </button>
-	                  <button
-	                    aria-pressed={selectedType === "ico"}
-	                    className={cn(
-                      "rounded-full px-4 py-2 text-sm font-semibold transition-all duration-300",
-                      selectedType === "ico"
-                        ? "bg-primary text-primary-foreground"
-                        : "text-muted-foreground"
-                    )}
-                    onClick={() => setSelectedType("ico")}
-                    type="button"
-                  >
-                    IČO
-                  </button>
+	                  >
+	                    VIN
+	                  </button>
                 </div>
               </div>
 
@@ -644,7 +622,7 @@ export default function App() {
                   <div className="relative flex-1">
                     <Search className="pointer-events-none absolute left-5 top-1/2 size-5 -translate-y-1/2 text-muted-foreground" />
 	                    <Input
-	                      aria-label="Zadejte SPZ, VIN, IČO nebo odkaz na inzerát"
+	                      aria-label="Zadejte SPZ, VIN nebo odkaz na inzerát"
 	                      autoComplete="off"
                       className={cn(
                         "border-white/10 bg-secondary pl-12 pr-4 text-base placeholder:text-muted-foreground/80",
@@ -652,7 +630,7 @@ export default function App() {
                       )}
                       maxLength={400}
                       onChange={(event) => handleQueryChange(event.target.value)}
-                      placeholder="SPZ, VIN, IČO nebo odkaz na inzerát"
+                      placeholder="SPZ, VIN nebo odkaz na inzerát"
                       value={query}
                     />
                   </div>
@@ -667,14 +645,13 @@ export default function App() {
 
                   <Button
                     aria-label="Nahrát foto SPZ"
-                    className={cn("px-4", hasSearched ? "h-12" : "h-14")}
+                    className={cn("shrink-0 px-0", hasSearched ? "h-12 w-12" : "h-14 w-14")}
                     disabled={scanLoading || loading}
                     onClick={() => plateImageInputRef.current?.click()}
                     type="button"
                     variant="outline"
                   >
                     {scanLoading ? <Loader2 className="size-5 animate-spin" /> : <Camera className="size-5" />}
-                    <span className="ml-2">Nahrát foto SPZ</span>
                   </Button>
 
                   <Button className={cn("rounded-full px-6 sm:px-7", hasSearched ? "h-12" : "h-14")} disabled={scanLoading} size="lg" type="submit">
@@ -870,7 +847,6 @@ function getTimelineDateSortScore(value) {
 }
 
 function ResultState({ result }) {
-  const detailSections = Array.isArray(result.sections) ? result.sections : [];
   const timelineEntries = useMemo(
     () => sortTimelineEntriesForDisplay(Array.isArray(result.timeline) ? result.timeline : []),
     [result.timeline]
@@ -881,17 +857,7 @@ function ResultState({ result }) {
   const inspectionLookup = result.inspectionLookup || null;
   const ownershipLookup = result.ownershipLookup || null;
   const identifierHighlights = extractIdentifierHighlights(result.highlights);
-  const summaryHighlights = Array.isArray(result.highlights)
-    ? result.highlights.filter((item) => !isHiddenSummaryHighlight(item.label))
-    : [];
-  const compactSections = detailSections
-    .map((section) => ({
-      ...section,
-      items: Array.isArray(section.items)
-        ? section.items.filter((item) => !isInternalVehicleIdentifierLabel(item.label))
-        : []
-    }))
-    .filter((section) => section.items.length > 0);
+  const summaryHighlights = buildSummaryHighlights(result);
   const dimensions = getVehicleDimensions(result);
   const subjectHistoryMeta = formatSubjectHistoryMeta(legalParties.length);
 
@@ -945,64 +911,6 @@ function ResultState({ result }) {
       {dimensions ? <VehicleDimensionsPanel dimensions={dimensions} /> : null}
 
 	      <OwnershipPanel ownership={result.ownership} parties={parties} lookup={ownershipLookup} query={result.query} />
-
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
-        <Card className="border-white/10 bg-card/78">
-          <CardHeader className="pb-4">
-            <CardDescription className="uppercase tracking-[0.22em] text-muted-foreground">
-              Detaily
-            </CardDescription>
-            <CardTitle className="text-2xl text-white">Registrace a technické údaje</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-6">
-            {compactSections.length > 0 ? (
-              compactSections.map((section) => (
-                <div className="space-y-3" key={section.title}>
-                  <div className="border-b border-white/8 pb-2">
-                    <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-muted-foreground">
-                      {section.title}
-                    </p>
-                  </div>
-
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    {(section.items || []).map((item) => (
-                      <DetailRow item={item} key={`${section.title}-${item.label}`} />
-                    ))}
-                  </div>
-                </div>
-              ))
-            ) : (
-              <EmptyPanel text="Pro tento dotaz nejsou dostupné další detaily." />
-            )}
-          </CardContent>
-        </Card>
-
-        <Card className="border-white/10 bg-card/75">
-          <CardHeader className="pb-4">
-            <CardDescription className="uppercase tracking-[0.22em] text-muted-foreground">
-              Zdroj subjektu
-            </CardDescription>
-            <CardTitle className="text-2xl text-white">Dohledání</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <QuickMeta
-              icon={Building2}
-              label="Pravni forma"
-              value="Zobrazuji pouze právnické osoby s IČO nebo firemním typem subjektu."
-            />
-            <QuickMeta
-              icon={FileText}
-              label="Identifikator"
-              value={ownershipLookup?.vin ? `VIN ${ownershipLookup.vin}` : "Dohledání běží interně podle dostupných identifikátorů."}
-            />
-            <QuickMeta
-              icon={Clock3}
-              label="Stav"
-              value={formatOwnershipStatus(ownershipLookup, legalParties.length)}
-            />
-          </CardContent>
-        </Card>
-      </div>
 
       {inspections || inspectionLookup ? (
         <InspectionPanel inspections={inspections} inspectionLookup={inspectionLookup} />
@@ -1118,19 +1026,19 @@ function VehicleDimensionsPanel({ dimensions }) {
         <CardTitle className="text-2xl text-white">Rozměry a hmotnost vozidla</CardTitle>
       </CardHeader>
       <CardContent>
-        <div className="rounded-[1.5rem] bg-[#f8f8f6] p-3 text-[#0b0f17] shadow-soft sm:p-4">
+        <div className="rounded-[1.5rem] border border-white/10 bg-[#101722] p-3 text-slate-100 shadow-soft sm:p-4">
           <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_300px]">
             <VehicleDimensionsDrawing dimensions={dimensions} />
 
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
-              <div className="rounded-[1.25rem] border border-slate-200 bg-white p-3">
+              <div className="rounded-[1.25rem] border border-white/10 bg-[#0c121b] p-3">
                 <VehicleFrontDimensions dimensions={dimensions} />
               </div>
-              <div className="flex min-h-[180px] items-center justify-center rounded-[1.25rem] border border-slate-200 bg-white p-5">
-                <WeightIcon className="mr-5 size-16 text-blue-800" />
+              <div className="flex min-h-[180px] items-center justify-center rounded-[1.25rem] border border-white/10 bg-[#0c121b] p-5">
+                <WeightIcon className="mr-5 size-16 text-[#8fb4ff]" />
                 <div>
-                  <p className="text-2xl font-semibold text-blue-900">Hmotnost</p>
-                  <p className="text-4xl font-semibold text-black">{dimensions.weight || "-"}</p>
+                  <p className="text-2xl font-semibold text-[#8fb4ff]">Hmotnost</p>
+                  <p className="text-4xl font-semibold text-slate-50">{dimensions.weight || "-"}</p>
                 </div>
               </div>
             </div>
@@ -1185,18 +1093,18 @@ function VehicleFrontSilhouette(props) {
 
 function VehicleDimensionsDrawing({ dimensions }) {
   return (
-    <div className="rounded-[1.25rem] border border-slate-200 bg-white p-2">
+    <div className="rounded-[1.25rem] border border-white/10 bg-[#0c121b] p-2">
       <svg className="h-auto w-full" role="img" aria-label="Grafické zobrazení rozměrů vozidla" viewBox="0 0 880 520">
         <defs>
           <marker id="dimension-arrow" markerHeight="7" markerWidth="7" orient="auto" refX="3.5" refY="3.5">
-            <path d="M0 0 7 3.5 0 7Z" fill="#0d3f9e" />
+            <path d="M0 0 7 3.5 0 7Z" fill="#8fb4ff" />
           </marker>
         </defs>
 
-        <rect width="880" height="520" fill="#fff" />
+        <rect width="880" height="520" fill="#0c121b" />
         <VehicleSideSilhouette x="45" y="120" width="745" height="268" preserveAspectRatio="xMidYMid meet" />
 
-        <g stroke="#0d3f9e" strokeWidth="2.2">
+        <g stroke="#8fb4ff" strokeWidth="2.2">
           <path d="M66 345v142M800 345v142M187 337v92M638 337v92" strokeDasharray="8 9" />
           <path d="M73 468H793" markerEnd="url(#dimension-arrow)" markerStart="url(#dimension-arrow)" />
           <path d="M196 385H630" markerEnd="url(#dimension-arrow)" markerStart="url(#dimension-arrow)" />
@@ -1204,13 +1112,13 @@ function VehicleDimensionsDrawing({ dimensions }) {
           <path d="M768 117h58M768 400h58" strokeDasharray="8 9" />
         </g>
         <g fontFamily="inherit" fontWeight="700">
-          <text fill="#0d3f9e" fontSize="24" textAnchor="middle" x="420" y="437">Rozvor</text>
-          <text fill="#030712" fontSize="28" textAnchor="start" x="500" y="437">{dimensions.wheelbase || "-"}</text>
-          <text fill="#0d3f9e" fontSize="24" textAnchor="middle" x="420" y="510">Délka</text>
-          <text fill="#030712" fontSize="28" textAnchor="start" x="496" y="510">{dimensions.length || "-"}</text>
-          <rect fill="#fff" height="76" rx="10" width="122" x="738" y="204" />
-          <text fill="#0d3f9e" fontSize="24" x="752" y="236">Výška</text>
-          <text fill="#030712" fontSize="26" x="752" y="274">{dimensions.height || "-"}</text>
+          <text fill="#8fb4ff" fontSize="24" textAnchor="middle" x="420" y="437">Rozvor</text>
+          <text fill="#f8fafc" fontSize="28" textAnchor="start" x="500" y="437">{dimensions.wheelbase || "-"}</text>
+          <text fill="#8fb4ff" fontSize="24" textAnchor="middle" x="420" y="510">Délka</text>
+          <text fill="#f8fafc" fontSize="28" textAnchor="start" x="496" y="510">{dimensions.length || "-"}</text>
+          <rect fill="#101722" stroke="#263241" height="76" rx="10" width="122" x="738" y="204" />
+          <text fill="#8fb4ff" fontSize="24" x="752" y="236">Výška</text>
+          <text fill="#f8fafc" fontSize="26" x="752" y="274">{dimensions.height || "-"}</text>
         </g>
       </svg>
     </div>
@@ -1222,17 +1130,17 @@ function VehicleFrontDimensions({ dimensions }) {
     <svg className="h-auto w-full" role="img" aria-label="Grafické zobrazení šířky vozidla" viewBox="0 0 320 235">
       <defs>
         <marker id="front-dimension-arrow" markerHeight="7" markerWidth="7" orient="auto" refX="3.5" refY="3.5">
-          <path d="M0 0 7 3.5 0 7Z" fill="#0d3f9e" />
+          <path d="M0 0 7 3.5 0 7Z" fill="#8fb4ff" />
         </marker>
       </defs>
-      <rect width="320" height="235" fill="#fff" />
+      <rect width="320" height="235" fill="#0c121b" />
       <VehicleFrontSilhouette x="55" y="0" width="210" height="210" />
-      <g stroke="#0d3f9e" strokeWidth="2">
+      <g stroke="#8fb4ff" strokeWidth="2">
         <path d="M45 139v70M275 139v70" strokeDasharray="7 8" />
         <path d="M52 198H268" markerEnd="url(#front-dimension-arrow)" markerStart="url(#front-dimension-arrow)" />
       </g>
-      <text fill="#0d3f9e" fontSize="20" fontWeight="700" textAnchor="end" x="160" y="225">Šířka</text>
-      <text fill="#030712" fontSize="22" fontWeight="700" x="174" y="225">{dimensions.width || "-"}</text>
+      <text fill="#8fb4ff" fontSize="20" fontWeight="700" textAnchor="end" x="160" y="225">Šířka</text>
+      <text fill="#f8fafc" fontSize="22" fontWeight="700" x="174" y="225">{dimensions.width || "-"}</text>
     </svg>
   );
 }
@@ -2320,25 +2228,21 @@ function InlineMeta({ icon: Icon, value, tone = "default" }) {
 
 function IcoLookupLink({ ico, emptyText = "IČO není ve zdroji" }) {
   const normalizedIco = normalizeSharedLookupValue("ico", ico);
+  const aresUrl = buildAresUrl(normalizedIco);
 
-  if (!normalizedIco) {
+  if (!aresUrl) {
     return <span>{emptyText}</span>;
   }
 
   return (
     <a
-      className="break-all font-medium text-muted-foreground transition-colors hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-      href={buildSharePath("ico", normalizedIco)}
-      onClick={(event) => {
-        if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
-          return;
-        }
-
-        event.preventDefault();
-        navigateToSharedLookup("ico", normalizedIco);
-      }}
+      className="inline-flex break-all font-medium text-muted-foreground transition-colors hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+      href={aresUrl}
+      rel="noreferrer"
+      target="_blank"
     >
       IČO {normalizedIco}
+      <ArrowUpRight className="ml-1 size-3.5 shrink-0" />
     </a>
   );
 }
@@ -2371,17 +2275,6 @@ function CompactPartyCard({ party }) {
         <p className="mt-3 text-sm font-semibold text-white">{party.name || "Bez názvu"}</p>
       )}
       <p className="mt-1 text-sm leading-6 text-muted-foreground">{formatFrontendText(compactPartyMeta(party))}</p>
-    </div>
-  );
-}
-
-function DetailRow({ item }) {
-  return (
-    <div className="rounded-[1.1rem] border border-white/8 bg-background/50 px-4 py-3">
-      <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-muted-foreground">
-        {formatFrontendText(item.label)}
-      </p>
-      <p className="mt-2 text-sm font-medium leading-6 text-white">{formatFrontendText(item.value)}</p>
     </div>
   );
 }
@@ -2830,12 +2723,53 @@ function extractIdentifierHighlights(highlights) {
   return preferred.length > 0 ? preferred : items.slice(0, 2);
 }
 
-function isHiddenSummaryHighlight(label) {
-  return ["spz", "vin", "pcv"].includes(normalizeForMatch(label));
+function buildSummaryHighlights(result) {
+  const highlights = Array.isArray(result?.highlights)
+    ? result.highlights.filter((item) => !isHiddenSummaryHighlight(item.label))
+    : [];
+  const seen = new Set(highlights.map((item) => normalizeForMatch(item?.label)).filter(Boolean));
+  const extraLabels = [
+    "První registrace v ČR",
+    "Typ",
+    "Varianta",
+    "Kategorie",
+    "Zdvihový objem",
+    "Barva",
+    "Převodovka",
+    "Počet míst",
+    "Emise platné do",
+    "Odcizení",
+    "Zástavní právo"
+  ];
+  const extras = extraLabels
+    .map((label) => findVehicleSectionItem(result, label))
+    .filter((item) => {
+      const key = normalizeForMatch(item?.label);
+      if (!key || seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+
+  return [...highlights, ...extras];
 }
 
-function isInternalVehicleIdentifierLabel(label) {
-  return normalizeForMatch(label) === "pcv";
+function findVehicleSectionItem(result, label) {
+  const labelKey = normalizeForMatch(label);
+  for (const section of Array.isArray(result?.sections) ? result.sections : []) {
+    for (const item of Array.isArray(section?.items) ? section.items : []) {
+      if (normalizeForMatch(item?.label) === labelKey && normalizeWhitespace(item?.value)) {
+        return item;
+      }
+    }
+  }
+
+  return null;
+}
+
+function isHiddenSummaryHighlight(label) {
+  return ["spz", "vin", "pcv"].includes(normalizeForMatch(label));
 }
 
 function getVehicleDimensions(result) {
@@ -3242,7 +3176,7 @@ function splitOwnershipParties(parties) {
     }
 
     const roleKey = normalizeOwnershipRoleKey(party.role);
-    const sinceTime = parseOwnershipDate(party.since || extractPeriodStartForUi(party.period));
+    const sinceTime = getOwnershipPartyStartTime(party);
     const previous = latestOpenByRole.get(roleKey);
 
     if (!previous || sinceTime > previous.sinceTime || (sinceTime === previous.sinceTime && index > previous.index)) {
@@ -3256,8 +3190,19 @@ function splitOwnershipParties(parties) {
       const selected = latestOpenByRole.get(roleKey);
       const isSourceOpenEnded = isCurrentOwnershipParty(party);
       const isEffectiveCurrent = isSourceOpenEnded && selected?.index === index;
+      const sinceTime = getOwnershipPartyStartTime(party);
+      const inferredDateTo =
+        isSourceOpenEnded && !isEffectiveCurrent && selected?.sinceTime > sinceTime
+          ? new Date(selected.sinceTime).toISOString()
+          : party.dateTo;
+      const inferredPeriod =
+        inferredDateTo && !party.dateTo
+          ? `${firstNonEmpty([party.since, party.dateFrom ? formatDate(party.dateFrom) : null, extractPeriodStartForUi(party.period)])} - ${formatDate(inferredDateTo)}`
+          : party.period;
       const normalizedParty = {
         ...party,
+        dateTo: inferredDateTo,
+        period: inferredPeriod,
         current: isEffectiveCurrent,
         sourceOpenEnded: isSourceOpenEnded && !isEffectiveCurrent
       };
@@ -3483,8 +3428,7 @@ function formatOwnershipIntervalDate(timestamp) {
   return new Intl.DateTimeFormat("cs-CZ", {
     day: "numeric",
     month: "numeric",
-    year: "numeric",
-    timeZone: "UTC"
+    year: "numeric"
   }).format(new Date(timestamp));
 }
 
@@ -3681,7 +3625,7 @@ function ErrorState({ message, query, type }) {
               <p className="text-sm font-semibold text-white">Poslední dotaz</p>
             </div>
             <p className="text-sm leading-7 text-muted-foreground">
-              {(type === "vin" ? "VIN" : type === "ico" ? "IČO" : "SPZ") + (query ? `: ${query}` : "")}
+              {(type === "vin" ? "VIN" : "SPZ") + (query ? `: ${query}` : "")}
             </p>
           </div>
         </div>
@@ -3820,8 +3764,7 @@ function readSharedLookupFromLocation() {
   for (const [paramName, type] of [
     ["spz", "plate"],
     ["plate", "plate"],
-    ["vin", "vin"],
-    ["ico", "ico"]
+    ["vin", "vin"]
   ]) {
     const value = normalizeSharedLookupValue(type, url.searchParams.get(paramName));
     if (value) {
@@ -3863,7 +3806,7 @@ function buildShareUrl(type, value) {
 }
 
 function buildSharePath(type, value) {
-  const slug = type === "ico" ? "ico" : type === "vin" ? "vin" : "spz";
+  const slug = type === "vin" ? "vin" : "spz";
   return `/${slug}/${encodeURIComponent(value)}`;
 }
 
@@ -3903,10 +3846,6 @@ function normalizeLookupType(value) {
 
   if (normalized === "vin") {
     return "vin";
-  }
-
-  if (normalized === "ico" || normalized === "ic") {
-    return "ico";
   }
 
   return "";
@@ -3977,10 +3916,6 @@ function detectType(value) {
     .toUpperCase()
     .replace(/[^A-Z0-9]/g, "");
 
-  if (/^\d{8}$/.test(compact) && isValidIco(compact)) {
-    return "ico";
-  }
-
   if (/^[A-HJ-NPR-Z0-9]{17}$/.test(compact)) {
     return "vin";
   }
@@ -4032,7 +3967,7 @@ function renderQuery(query) {
     return "Bez dotazu";
   }
 
-  return `${query.type === "vin" ? "VIN" : query.type === "ico" ? "IČO" : "SPZ"} | ${query.raw || query.normalized || ""}`;
+  return `${query.type === "vin" ? "VIN" : "SPZ"} | ${query.raw || query.normalized || ""}`;
 }
 
 function formatResolvedTime(value) {
