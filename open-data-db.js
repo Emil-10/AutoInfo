@@ -7,9 +7,14 @@ const ACTIVE_DATASET_VERSION_CACHE_TTL_MS = Math.max(
   1000,
   Number(process.env.ACTIVE_DATASET_VERSION_CACHE_TTL_MS || 30000) || 30000
 );
+const DATABASE_FAILURE_COOLDOWN_MS = Math.max(
+  1000,
+  Number(process.env.DATABASE_FAILURE_COOLDOWN_MS || 30000) || 30000
+);
 
 let pool = null;
 const activeDatasetVersionCache = new Map();
+let databaseUnavailableUntil = 0;
 
 function isDatabaseConfigured() {
   return DB_ENABLED && Boolean(DATABASE_URL);
@@ -19,7 +24,8 @@ function getDatabaseRuntimeStatus() {
   return {
     configured: Boolean(DATABASE_URL),
     enabled: DB_ENABLED,
-    ssl: resolveSslMode() ? "enabled" : "disabled"
+    ssl: resolveSslMode() ? "enabled" : "disabled",
+    unavailableUntil: databaseUnavailableUntil || null
   };
 }
 
@@ -39,8 +45,8 @@ function buildPoolConfig() {
   const max = Math.max(1, Number(process.env.DATABASE_POOL_MAX || 5) || 5);
   const idleTimeoutMillis = Math.max(1000, Number(process.env.DATABASE_IDLE_TIMEOUT_MS || 30000) || 30000);
   const connectionTimeoutMillis = Math.max(
-    1000,
-    Number(process.env.DATABASE_CONNECTION_TIMEOUT_MS || 8000) || 8000
+    500,
+    Number(process.env.DATABASE_CONNECTION_TIMEOUT_MS || 1500) || 1500
   );
   const ssl = resolveSslMode();
 
@@ -82,12 +88,27 @@ async function closeDatabasePool() {
 }
 
 async function withOptionalClient(callback) {
+  if (Date.now() < databaseUnavailableUntil) {
+    return null;
+  }
+
   const currentPool = getPool();
   if (!currentPool) {
     return null;
   }
 
-  const client = await currentPool.connect();
+  let client;
+  try {
+    client = await currentPool.connect();
+    databaseUnavailableUntil = 0;
+  } catch (error) {
+    databaseUnavailableUntil = Date.now() + DATABASE_FAILURE_COOLDOWN_MS;
+    if (String(process.env.OPEN_DATA_DB_STRICT || "false").toLowerCase() === "true") {
+      throw error;
+    }
+    return null;
+  }
+
   try {
     return await callback(client);
   } catch (error) {

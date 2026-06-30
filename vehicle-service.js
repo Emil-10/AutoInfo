@@ -15,6 +15,7 @@ const LISTING_URL_LOOKUP_ENABLED = String(process.env.LISTING_URL_LOOKUP_ENABLED
 const LISTING_URL_LOOKUP_TIMEOUT_MS = Math.max(2000, Number(process.env.LISTING_URL_LOOKUP_TIMEOUT_MS || 8000) || 8000);
 const OCR_PLATE_LOOKUP_ENABLED = String(process.env.OCR_PLATE_LOOKUP_ENABLED || "true").toLowerCase() !== "false";
 const OCR_PLATE_MAX_IMAGE_BYTES = Math.max(256000, Number(process.env.OCR_PLATE_MAX_IMAGE_BYTES || 5500000) || 5500000);
+const OCR_PLATE_TIMEOUT_MS = Math.max(1000, Number(process.env.OCR_PLATE_TIMEOUT_MS || 10000) || 10000);
 const ALPR_PLATE_LOOKUP_ENABLED = String(process.env.ALPR_PLATE_LOOKUP_ENABLED || "true").toLowerCase() !== "false";
 const ALPR_PROVIDER = normalizeWhitespace(process.env.ALPR_PROVIDER || "auto").toLowerCase();
 const PLATE_RECOGNIZER_API_URL = normalizeWhitespace(
@@ -40,6 +41,17 @@ const PVZP_USER_AGENT =
   process.env.PVZP_USER_AGENT ||
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
 const PVZP_CACHE_TTL_MS = Math.max(0, Number(process.env.PVZP_CACHE_TTL_MS || 900000) || 900000);
+const PVZP_DIRECT_LOOKUP_ENABLED =
+  String(process.env.PVZP_DIRECT_LOOKUP_ENABLED || "true").toLowerCase() !== "false";
+const PVZP_DIRECT_LOOKUP_URL = normalizeWhitespace(
+  process.env.PVZP_DIRECT_LOOKUP_URL || "https://online.pvzp.cz/clfe/svc/integration/vehicle"
+);
+const PVZP_DIRECT_LOOKUP_TIMEOUT_MS = Math.max(
+  1000,
+  Number(process.env.PVZP_DIRECT_LOOKUP_TIMEOUT_MS || 4500) || 4500
+);
+const PVZP_BROWSER_FALLBACK_ENABLED =
+  String(process.env.PVZP_BROWSER_FALLBACK_ENABLED || "false").toLowerCase() === "true";
 const VIN_PLATE_PVZP_LOOKUP_ENABLED =
   String(process.env.VIN_PLATE_PVZP_LOOKUP_ENABLED || "true").toLowerCase() !== "false";
 const VIN_PLATE_PVZP_LOOKUP_TIMEOUT_MS = Math.max(
@@ -59,6 +71,14 @@ const BROWSERLESS_ENABLED = Boolean(BROWSERLESS_WS_URL);
 const THIRD_PARTY_OWNERSHIP_FALLBACK_ENABLED =
   String(process.env.THIRD_PARTY_OWNERSHIP_FALLBACK_ENABLED || "false").toLowerCase() === "true";
 const FAST_LOOKUP_MODE = String(process.env.FAST_LOOKUP_MODE || "true").toLowerCase() !== "false";
+const FAST_PLATE_LOOKUP_TARGET_MS = Math.max(
+  1500,
+  Number(process.env.FAST_PLATE_LOOKUP_TARGET_MS || 2800) || 2800
+);
+const OFFICIAL_VIN_FAST_LOOKUP_TIMEOUT_MS = Math.max(
+  250,
+  Number(process.env.OFFICIAL_VIN_FAST_LOOKUP_TIMEOUT_MS || 700) || 700
+);
 const ALLOW_RUNTIME_OPEN_DATA_INSPECTION_SCAN =
   String(process.env.ALLOW_RUNTIME_OPEN_DATA_INSPECTION_SCAN || "false").toLowerCase() === "true";
 const ALLOW_RUNTIME_OPEN_DATA_OWNERSHIP_SCAN =
@@ -489,6 +509,9 @@ function getLookupRuntimeStatus() {
     },
     plateFallback: {
       enabled: PVZP_LOOKUP_ENABLED,
+      directEnabled: PVZP_DIRECT_LOOKUP_ENABLED,
+      directTimeoutMs: PVZP_DIRECT_LOOKUP_TIMEOUT_MS,
+      browserFallbackEnabled: PVZP_BROWSER_FALLBACK_ENABLED,
       browserConfigured: plateBrowserConfigured,
       browserSource: PVZP_BROWSER_INFO.source,
       headless: PVZP_HEADLESS,
@@ -713,8 +736,20 @@ async function scanPlateImage(imageData) {
     throw error;
   }
 
-  const ocr = await queuePlateOcr(image.buffer);
-  const candidate = ocr.candidate || extractVehicleIdentifierFromText(ocr.text, { preferPlate: true, strictPlate: true });
+  let ocr;
+  try {
+    ocr = await queuePlateOcr(image.buffer);
+  } catch (error) {
+    if (error.code === "OCR_TIMEOUT") {
+      await resetOcrWorker().catch(() => null);
+    }
+    throw error;
+  }
+  const candidate = ocr.candidate || extractVehicleIdentifierFromText(ocr.text, {
+    preferPlate: true,
+    strictPlate: true,
+    allowCustomPlate: true
+  });
 
   if (!candidate) {
     const error = new Error("SPZ se z fotky nepodařilo bezpečně přečíst.");
@@ -882,17 +917,32 @@ function findBestPlateCandidate(text, options = {}) {
     pushCandidate(labelMatch[2], 5);
   }
 
-  const looseMatches = text.match(/[A-Z0-9][A-Z0-9\s-]{3,12}[A-Z0-9]/g) || [];
+  const loosePattern = options.strictPlate
+    ? /[A-Z0-9][A-Z0-9-]{3,12}[A-Z0-9]/g
+    : /[A-Z0-9][A-Z0-9\s-]{3,12}[A-Z0-9]/g;
+  const looseMatches = text.match(loosePattern) || [];
   looseMatches.forEach((match) => {
+    if (options.strictPlate && normalizePlateCandidate(match).length > 10 && /[\s-]/.test(match)) {
+      match.split(/[\s-]+/).forEach((part) => pushCandidate(part));
+      return;
+    }
     pushCandidate(match);
   });
 
-  if (options.strictPlate) {
+  if (options.strictPlate && !/\s/.test(normalizeWhitespace(text))) {
     pushCandidate(normalizePlateCandidate(text), -1);
   }
 
   const ranked = Array.from(scored.values())
-    .sort((left, right) => right.score - left.score || left.candidate.length - right.candidate.length);
+    .sort((left, right) => {
+      const scoreDelta = right.score - left.score;
+      if (scoreDelta) {
+        return scoreDelta;
+      }
+      return options.strictPlate
+        ? right.candidate.length - left.candidate.length
+        : left.candidate.length - right.candidate.length;
+    });
   return ranked[0]?.candidate || null;
 }
 
@@ -929,6 +979,12 @@ function buildPlateCandidateVariants(value, options = {}) {
           addRaw(compact.slice(index, index + length));
         }
       });
+    }
+    if (options.allowCustomPlate && compact.length >= 9 && compact.length <= 10) {
+      // ponytail: OCR sometimes inserts one extra glyph into custom plates; one deletion keeps this bounded.
+      for (let index = 0; index < compact.length; index += 1) {
+        addRaw(compact.slice(0, index) + compact.slice(index + 1));
+      }
     }
   }
 
@@ -1093,7 +1149,11 @@ function scorePlateCandidate(candidate, options = {}) {
   }
 
   if (options.allowCustomPlate && isLikelyCzechCustomPlate(candidate)) {
-    return isStrict ? 10 : 6;
+    let customScore = isStrict ? 10 : 6;
+    if (/^\d{2,3}[A-Z0-9]{4,5}$/.test(candidate)) {
+      customScore += 2;
+    }
+    return customScore;
   }
 
   if (isStrict) {
@@ -1413,9 +1473,32 @@ function parsePlateImagePayload(value) {
 }
 
 async function queuePlateOcr(buffer) {
-  const task = OCR_QUEUE.catch(() => null).then(() => runPlateOcr(buffer));
+  const task = OCR_QUEUE.catch(() => null).then(() => withTimeout(
+    runPlateOcr(buffer),
+    OCR_PLATE_TIMEOUT_MS,
+    "OCR_TIMEOUT",
+    "Čtení SPZ z fotky překročilo časový limit."
+  ));
   OCR_QUEUE = task.catch(() => null);
   return task;
+}
+
+function withTimeout(promise, timeoutMs, code, message) {
+  let timeoutId = null;
+  return Promise.race([
+    promise,
+    new Promise((resolve, reject) => {
+      timeoutId = setTimeout(() => {
+        const error = new Error(message);
+        error.code = code;
+        reject(error);
+      }, timeoutMs);
+    })
+  ]).finally(() => {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  });
 }
 
 async function runPlateOcr(buffer) {
@@ -1436,7 +1519,11 @@ async function runPlateOcr(buffer) {
       const text = normalizeWhitespace(result?.data?.text || "");
       const confidence =
         typeof result?.data?.confidence === "number" ? Math.round(result.data.confidence) : null;
-      const candidate = extractVehicleIdentifierFromText(text, { preferPlate: true, strictPlate: true });
+      const candidate = extractVehicleIdentifierFromText(text, {
+        preferPlate: true,
+        strictPlate: true,
+        allowCustomPlate: true
+      });
 
       if (text && !seenText.has(text)) {
         seenText.add(text);
@@ -1498,6 +1585,13 @@ function buildPlateOcrRegions(buffer) {
 
   const aspectRatio = dimensions.width / dimensions.height;
   const targetedRegions = [];
+
+  if (aspectRatio >= 2.2) {
+    targetedRegions.push(
+      makeRelativeOcrRegion(dimensions, "plate-like-full-line", 0.00, 0.00, 1.00, 1.00, 8, PSM.SINGLE_LINE),
+      makeRelativeOcrRegion(dimensions, "plate-like-center-line", 0.04, 0.12, 0.92, 0.76, 7, PSM.SINGLE_LINE)
+    );
+  }
 
   if (aspectRatio < 0.85) {
     targetedRegions.push(
@@ -1638,7 +1732,9 @@ function scorePlateOcrPass(candidate, confidence, regionPriority) {
     return 0;
   }
 
-  return scorePlateCandidate(candidate.identifier, { strictPlate: true }) + Math.max(0, Number(confidence || 0)) / 20 + regionPriority;
+  return scorePlateCandidate(candidate.identifier, { strictPlate: true, allowCustomPlate: true }) +
+    Math.max(0, Number(confidence || 0)) / 10 +
+    regionPriority / 2;
 }
 
 async function getOcrWorker() {
@@ -1657,6 +1753,22 @@ async function getOcrWorker() {
   }
 
   return OCR_WORKER_PROMISE;
+}
+
+async function resetOcrWorker() {
+  const workerPromise = OCR_WORKER_PROMISE;
+  OCR_WORKER_PROMISE = null;
+  if (!workerPromise) {
+    return;
+  }
+
+  const worker = await Promise.race([
+    workerPromise.catch(() => null),
+    new Promise((resolve) => setTimeout(() => resolve(null), 1000))
+  ]);
+  if (worker?.terminate) {
+    await worker.terminate();
+  }
 }
 
 function formatLookupError(error) {
@@ -1700,6 +1812,7 @@ function formatVignetteLookupError(error) {
 }
 
 async function lookupVehicle(query, options = {}) {
+  const lookupStartedAt = Date.now();
   let lookup = parseLookupQuery(query, options.type);
   const diagnostics = createLookupDiagnostics(lookup);
   const listingResolution = await resolveListingLookupQuery(query, diagnostics);
@@ -1710,8 +1823,14 @@ async function lookupVehicle(query, options = {}) {
     diagnostics.resolvedLookup = lookup;
     diagnostics.resolvedFromUrl = true;
   }
-  const databaseRecord = await lookupFromOpenDataDatabase(lookup, diagnostics);
-  const liveRecord = databaseRecord ? null : await lookupFromConfiguredProvider(lookup, diagnostics);
+  const shouldUseBrowserPlateFallback =
+    lookup.type === "plate" || (lookup.type === "vin" && VIN_PLATE_PVZP_LOOKUP_ENABLED);
+  const shouldPreferFastPlateResolver = FAST_LOOKUP_MODE && lookup.type === "plate" && shouldUseBrowserPlateFallback;
+  const fastPlateFallbackRecord = shouldPreferFastPlateResolver
+    ? await lookupFromPvzpBrowser(lookup, diagnostics)
+    : null;
+  const databaseRecord = fastPlateFallbackRecord ? null : await lookupFromOpenDataDatabase(lookup, diagnostics);
+  const liveRecord = databaseRecord || fastPlateFallbackRecord ? null : await lookupFromConfiguredProvider(lookup, diagnostics);
   const liveDatabaseRecord = databaseRecord || !liveRecord
     ? null
     : await lookupResolvedRecordFromOpenDataDatabase(lookup, liveRecord, diagnostics);
@@ -1719,23 +1838,31 @@ async function lookupVehicle(query, options = {}) {
   const directVinRecord = lookup.type === "vin" && !liveRecord && !localDatabaseRecord
     ? await lookupFromOfficialVinApiWithBudget(lookup, diagnostics, false)
     : null;
-  const shouldUseBrowserPlateFallback =
-    lookup.type === "plate" || (lookup.type === "vin" && VIN_PLATE_PVZP_LOOKUP_ENABLED);
-  const pvzpRecord = shouldUseBrowserPlateFallback && !databaseRecord && !liveRecord && !liveDatabaseRecord
+  const pvzpRecord = fastPlateFallbackRecord || (shouldUseBrowserPlateFallback && !databaseRecord && !liveRecord && !liveDatabaseRecord
     ? await lookupFromPvzpBrowser(lookup, diagnostics)
-    : null;
+    : null);
   const uniqaRecord = lookup.type === "plate" && shouldUseBrowserPlateFallback && !databaseRecord && !liveRecord && !liveDatabaseRecord && !pvzpRecord
     ? await lookupFromUniqaBrowser(lookup, diagnostics)
     : null;
   const plateFallbackRecord = pvzpRecord || uniqaRecord;
-  const fallbackDatabaseRecord = databaseRecord || liveDatabaseRecord || !plateFallbackRecord
+  const shouldDeferPlateDatabaseHydration =
+    FAST_LOOKUP_MODE && lookup.type === "plate" && plateFallbackRecord && !options.includeInspections && !options.includeOwnership;
+  const fallbackDatabaseRecord = databaseRecord || liveDatabaseRecord || !plateFallbackRecord || shouldDeferPlateDatabaseHydration
     ? null
     : await lookupResolvedRecordFromOpenDataDatabase(lookup, plateFallbackRecord, diagnostics);
   const resolvedDatabaseRecord = localDatabaseRecord || fallbackDatabaseRecord;
   const officialVinLookup = resolveSupplementalVinLookup(lookup, liveRecord || resolvedDatabaseRecord || plateFallbackRecord);
+  const publicVinLookupBudgetMs = lookup.type === "plate" && FAST_LOOKUP_MODE
+    ? FAST_PLATE_LOOKUP_TARGET_MS - (Date.now() - lookupStartedAt)
+    : undefined;
   const publicVinRecord = directVinRecord || lookup.type === "vin" || liveRecord || resolvedDatabaseRecord
     ? null
-    : await lookupFromOfficialVinApiWithBudget(officialVinLookup || lookup, diagnostics, lookup.type === "plate");
+    : await lookupFromOfficialVinApiWithBudget(
+        officialVinLookup || lookup,
+        diagnostics,
+        lookup.type === "plate",
+        publicVinLookupBudgetMs
+      );
   const mockRecord = liveRecord || resolvedDatabaseRecord || directVinRecord || publicVinRecord || plateFallbackRecord ? null : findMockVehicle(lookup);
   const baseSeed = resolvedDatabaseRecord || liveRecord || directVinRecord || publicVinRecord || plateFallbackRecord || mockRecord;
   const missingOfficialVinDetails =
@@ -1774,8 +1901,15 @@ async function lookupVehicle(query, options = {}) {
   const withRegistryState = shouldAttachRegistryState
     ? await attachPublicRegistryState(withOwnershipState)
     : withOwnershipState;
-  await persistPlateResolutionSnapshot(lookup, withRegistryState).catch(() => null);
-  await persistSupplementalOwnershipSnapshot(withRegistryState).catch(() => null);
+  const persistSnapshots = () => Promise.all([
+    persistPlateResolutionSnapshot(lookup, withRegistryState).catch(() => null),
+    persistSupplementalOwnershipSnapshot(withRegistryState).catch(() => null)
+  ]).catch(() => null);
+  if (FAST_LOOKUP_MODE) {
+    persistSnapshots();
+  } else {
+    await persistSnapshots();
+  }
   const sanitized = sanitizeClientRecord(withRegistryState);
   return {
     diagnostics,
@@ -1933,7 +2067,7 @@ function sanitizeDiagnosticsForClient(diagnostics) {
 
 function sanitizeLookupAttemptsForClient(attempts) {
   return (Array.isArray(attempts) ? attempts : [])
-    .filter((attempt) => !["pvzp-browser", "uniqa-browser"].includes(attempt?.source))
+    .filter((attempt) => !["pvzp-browser", "pvzp-direct", "uniqa-browser"].includes(attempt?.source))
     .map((attempt) => ({
       source: sanitizePublicLookupSource(attempt?.source),
       status: attempt?.status || null,
@@ -2544,15 +2678,28 @@ async function lookupFromOfficialVinApi(lookup, diagnostics) {
   }
 }
 
-async function lookupFromOfficialVinApiWithBudget(lookup, diagnostics, useFastBudget) {
+async function lookupFromOfficialVinApiWithBudget(lookup, diagnostics, useFastBudget, timeoutMs = OFFICIAL_VIN_FAST_LOOKUP_TIMEOUT_MS) {
   if (!useFastBudget || !FAST_LOOKUP_MODE) {
     return await lookupFromOfficialVinApi(lookup, diagnostics);
+  }
+
+  const boundedTimeoutMs = Math.min(
+    OFFICIAL_VIN_FAST_LOOKUP_TIMEOUT_MS,
+    Math.max(0, Number(timeoutMs ?? OFFICIAL_VIN_FAST_LOOKUP_TIMEOUT_MS) || 0)
+  );
+  if (boundedTimeoutMs <= 0) {
+    recordLookupAttempt(diagnostics, {
+      source: "official-vin-api",
+      status: "skipped",
+      detail: "Doplnkove VIN API bylo odlozeno, aby rychly SPZ lookup zustal pod casovym limitem."
+    });
+    return null;
   }
 
   return await Promise.race([
     lookupFromOfficialVinApi(lookup, diagnostics),
     new Promise((resolve) => {
-      setTimeout(() => resolve(null), 2500);
+      setTimeout(() => resolve(null), boundedTimeoutMs);
     })
   ]);
 }
@@ -2567,6 +2714,31 @@ async function lookupFromPvzpBrowser(lookup, diagnostics) {
       source: "pvzp-browser",
       status: "skipped",
       detail: "Externí doplňkový zdroj je vypnutý."
+    });
+    return null;
+  }
+
+  const cached = getCachedPvzpRecord(lookup.compact);
+  if (cached) {
+    recordLookupAttempt(diagnostics, {
+      source: "pvzp-direct",
+      status: "success",
+      detail: "Pouzita byla cache externiho doplnkoveho zdroje."
+    });
+    return clone(cached);
+  }
+
+  const directRecord = await lookupFromPvzpDirect(lookup, diagnostics);
+  if (directRecord) {
+    setCachedPvzpRecord(lookup.compact, directRecord);
+    return clone(directRecord);
+  }
+
+  if (!PVZP_BROWSER_FALLBACK_ENABLED) {
+    recordLookupAttempt(diagnostics, {
+      source: "pvzp-browser",
+      status: "skipped",
+      detail: "Browser fallback externiho doplnkoveho zdroje je vypnuty."
     });
     return null;
   }
@@ -2587,16 +2759,6 @@ async function lookupFromPvzpBrowser(lookup, diagnostics) {
       detail: "Na Linuxu chybí DISPLAY pro externí doplňkový zdroj."
     });
     return null;
-  }
-
-  const cached = getCachedPvzpRecord(lookup.compact);
-  if (cached) {
-    recordLookupAttempt(diagnostics, {
-      source: "pvzp-browser",
-      status: "success",
-      detail: "Použita byla cache externího doplňkového zdroje."
-    });
-    return clone(cached);
   }
 
   const attempts = [
@@ -2630,6 +2792,111 @@ async function lookupFromPvzpBrowser(lookup, diagnostics) {
     status: lastError ? "error" : "miss",
     detail: lastError ? formatLookupError(lastError) : "Externí doplňkový zdroj nevrátil žádná data."
   });
+
+  return null;
+}
+
+async function lookupFromPvzpDirect(lookup, diagnostics) {
+  if (!PVZP_DIRECT_LOOKUP_ENABLED || !PVZP_DIRECT_LOOKUP_URL) {
+    recordLookupAttempt(diagnostics, {
+      source: "pvzp-direct",
+      status: "skipped",
+      detail: "Primy externi doplnkovy zdroj je vypnuty."
+    });
+    return null;
+  }
+
+  const targetUrl = buildPvzpDirectLookupUrl(lookup);
+  if (!targetUrl) {
+    return null;
+  }
+
+  try {
+    const payload = await requestPvzpDirectPayloadWithRetry(targetUrl);
+    const record = normalizePvzpPayload(payload, lookup);
+    recordLookupAttempt(diagnostics, {
+      source: "pvzp-direct",
+      status: record ? "success" : "miss",
+      detail: record
+        ? "Primy externi doplnkovy zdroj vratil pouzitelna data."
+        : "Primy externi doplnkovy zdroj nevratil pouzitelna data."
+    });
+    return record;
+  } catch (error) {
+    recordLookupAttempt(diagnostics, {
+      source: "pvzp-direct",
+      status: error.code === "ETIMEDOUT" ? "timeout" : "error",
+      detail: formatLookupError(error)
+    });
+    return null;
+  }
+}
+
+async function requestPvzpDirectPayloadWithRetry(targetUrl) {
+  try {
+    return await requestPvzpDirectPayload(targetUrl);
+  } catch (error) {
+    if (error.code !== "ETIMEDOUT") {
+      throw error;
+    }
+    return await requestPvzpDirectPayload(targetUrl);
+  }
+}
+
+async function requestPvzpDirectPayload(targetUrl) {
+  const headers = {
+    Accept: "application/json",
+    Referer: "https://online.pvzp.cz/clfe/motor/",
+    "User-Agent": PVZP_USER_AGENT
+  };
+
+  if (typeof fetch !== "function") {
+    return await requestJson(targetUrl, {
+      method: "GET",
+      timeoutMs: PVZP_DIRECT_LOOKUP_TIMEOUT_MS,
+      headers
+    });
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), PVZP_DIRECT_LOOKUP_TIMEOUT_MS);
+  try {
+    const response = await fetch(targetUrl, {
+      method: "GET",
+      headers,
+      redirect: "follow",
+      signal: controller.signal
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      const error = new Error(`Rozhraní vrátilo ${response.status}: ${text.slice(0, 300) || "bez detailů"}`);
+      error.code = "HTTP_ERROR";
+      error.statusCode = response.status;
+      error.responseSnippet = text.slice(0, 300) || "bez detailů";
+      throw error;
+    }
+    return text ? JSON.parse(text) : null;
+  } catch (error) {
+    if (error.name === "AbortError") {
+      const timeoutError = new Error("Vypršel časový limit rozhraní.");
+      timeoutError.code = "ETIMEDOUT";
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function buildPvzpDirectLookupUrl(lookup) {
+  const baseUrl = PVZP_DIRECT_LOOKUP_URL.replace(/\/+$/, "");
+  if (lookup.type === "plate") {
+    return `${baseUrl}/lp=${encodeURIComponent(lookup.compact)}/info`;
+  }
+
+  if (lookup.type === "vin") {
+    return `${baseUrl}/lp=/vin=${encodeURIComponent(lookup.compact)}/info`;
+  }
 
   return null;
 }
@@ -3153,9 +3420,9 @@ function normalizePvzpPayload(payload, lookup) {
 
   return normalizeGenericPayload(
     {
-      plateNumber: payload.registrationPlateNumber || (lookup.type === "plate" ? lookup.compact : null),
+      plateNumber: payload.registrationPlateNumber || payload.spz || payload.plateNumber || (lookup.type === "plate" ? lookup.compact : null),
       vin: payload.vin,
-      category: payload.vehicleType,
+      category: payload.vehicleType || payload.vehicleTypeCode,
       status: "Doplněno z registru"
     },
     lookup,
@@ -4196,7 +4463,7 @@ async function enrichWithTechnicalInspections(record) {
   }
 }
 
-async function resolvePcvForVin(vin) {
+async function resolvePcvForVin(vin, options = {}) {
   const normalizedVin = normalizeWhitespace(vin).toUpperCase();
   if (!normalizedVin) {
     return null;
@@ -4204,7 +4471,17 @@ async function resolvePcvForVin(vin) {
 
   const cached = getTimedCacheValue(OPEN_DATA_PCV_CACHE, normalizedVin);
   if (cached !== undefined) {
-    return cached;
+    if (cached === null && options.ignoreNegativeCache) {
+      // A failed DB/index lookup can cache null; runtime CSV scans need one chance to prove it wrong.
+    } else {
+      return cached;
+    }
+  }
+
+  const persistent = getPersistentPcv(normalizedVin);
+  if (persistent) {
+    setTimedCacheValue(OPEN_DATA_PCV_CACHE, normalizedVin, persistent);
+    return persistent;
   }
 
   let matchedPcv = null;
@@ -5757,10 +6034,17 @@ async function attachInspectionState(record, options = {}) {
     return record;
   }
 
-  await ensureOpenDataPersistentCachesLoaded();
-
   const vin = normalizeWhitespace(extractIdentifier(record, "VIN")).toUpperCase() || null;
   const knownPcv = normalizeWhitespace(extractIdentifier(record, "PČV")) || null;
+  if (FAST_LOOKUP_MODE && !options.includeInspections && vin && !knownPcv) {
+    return {
+      ...record,
+      inspectionLookup: buildInspectionLookupState("pending", vin, null, null)
+    };
+  }
+
+  await ensureOpenDataPersistentCachesLoaded();
+
   let cachedPcv = knownPcv || (vin ? getPersistentPcv(vin) : null);
   if (!cachedPcv && vin) {
     cachedPcv = await resolveIndexedPcvForVin(vin);
@@ -5876,12 +6160,19 @@ async function attachOwnershipState(record, options = {}) {
     return record;
   }
 
-  await ensureOpenDataPersistentCachesLoaded();
-
   const parties = Array.isArray(record.ownership?.parties) ? record.ownership.parties : [];
   const hasConcreteParties = parties.some((party) => party && (party.name || party.ico));
   const vin = normalizeWhitespace(extractIdentifier(record, "VIN")).toUpperCase() || null;
   const knownPcv = normalizeWhitespace(extractIdentifier(record, "PČV")) || null;
+  if (FAST_LOOKUP_MODE && !options.includeOwnership && vin && !knownPcv && !hasConcreteParties) {
+    return {
+      ...record,
+      ownershipLookup: buildOwnershipLookupState("pending", vin, null, null)
+    };
+  }
+
+  await ensureOpenDataPersistentCachesLoaded();
+
   let cachedPcv = knownPcv || (vin ? getPersistentPcv(vin) : null);
   if (!cachedPcv && vin) {
     cachedPcv = await resolveIndexedPcvForVin(vin);
@@ -6095,7 +6386,7 @@ async function hydrateOwnershipData({ vin, pcv, record, plate }) {
   }
 
   if (!resolvedPcv && normalizedVin && ALLOW_RUNTIME_OPEN_DATA_OWNERSHIP_SCAN) {
-    resolvedPcv = await resolvePcvForVin(normalizedVin).catch(() => null);
+    resolvedPcv = await resolvePcvForVin(normalizedVin, { ignoreNegativeCache: true }).catch(() => null);
     if (resolvedPcv) {
       await storePersistentPcv(normalizedVin, resolvedPcv);
     }
@@ -6269,12 +6560,12 @@ function inferOwnershipPartyType(relation) {
 
 function isLegalEntitySubjectType(value) {
   const normalized = normalizeForMatch(value);
-  return normalized.includes("pravnick") || normalized.includes("company") || normalized.includes("firma");
+  return normalized === "2" || normalized.includes("pravnick") || normalized.includes("company") || normalized.includes("firma");
 }
 
 function isPhysicalSubjectType(value) {
   const normalized = normalizeForMatch(value);
-  return normalized.includes("fyzick") || normalized.includes("person");
+  return normalized === "1" || normalized.includes("fyzick") || normalized.includes("person");
 }
 
 function looksLikeCompanyName(value) {

@@ -3,10 +3,10 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Info Exleasing | VIN / SPZ / IČO</title>
+    <title>Info Exleasing | VIN / SPZ</title>
     <meta
       name="description"
-      content="Minimalistické tmavé vyhledávání vozidel podle VIN, SPZ nebo firemního IČO."
+      content="Minimalistické tmavé vyhledávání vozidel podle VIN nebo SPZ."
     />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -25,10 +25,9 @@
           <div class="mode-pill" id="mode-pill"></div>
           <span class="mode-option" data-type="plate">SPZ</span>
           <span class="mode-option" data-type="vin">VIN</span>
-          <span class="mode-option" data-type="ico">IČO</span>
         </div>
 
-        <label class="sr-only" for="vehicle-query">SPZ, VIN nebo IČO</label>
+        <label class="sr-only" for="vehicle-query">SPZ nebo VIN</label>
         <div class="search-box">
           <input
             id="vehicle-query"
@@ -36,14 +35,14 @@
             type="text"
             inputmode="text"
             autocomplete="off"
-            placeholder="Zadej SPZ, 17místný VIN nebo IČO"
+            placeholder="Zadej SPZ nebo 17místný VIN"
             maxlength="24"
           />
           <button type="submit" aria-label="Vyhledat">Hledat</button>
         </div>
 
         <p class="search-meta" id="search-status">
-          17 znaků automaticky přepne na VIN, platné osmimístné číslo na IČO.
+          17 znaků automaticky přepne na VIN.
         </p>
       </form>
     </main>

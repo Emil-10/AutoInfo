@@ -42,6 +42,66 @@ const AUX_SOURCE_NAMES = [
 const ALL_SOURCE_NAMES = [...CORE_SOURCE_NAMES, ...AUX_SOURCE_NAMES];
 const IMPORT_LOCK_KEY = [720191, 20260519];
 const OWNERSHIP_HISTORY_SCOPE_ACTIVE_COMPANY_PCVS = "active company pcvs";
+const OWNERSHIP_HISTORY_SCOPE_LEGAL_HISTORY = "legal history";
+const VEHICLE_VINS_ONLY_SWITCH_SQL = `
+  drop table if exists vehicle_vins_next;
+  create table vehicle_vins_next (
+    vin text primary key,
+    pcv text not null,
+    dataset_filename text,
+    dataset_date date,
+    imported_at timestamptz not null default now()
+  );
+
+  insert into vehicle_vins_next (
+    vin, pcv, dataset_filename, dataset_date, imported_at
+  )
+  select distinct on (vin)
+    vin, pcv, dataset_filename, dataset_date, now()
+  from vehicle_vins_staging
+  where vin is not null and pcv is not null
+  order by vin, pcv;
+
+  create index vehicle_vins_next_pcv_idx
+    on vehicle_vins_next (pcv);
+  analyze vehicle_vins_next;
+
+  drop table if exists vehicle_vins_old;
+  alter table vehicle_vins rename to vehicle_vins_old;
+  alter table vehicle_vins_next rename to vehicle_vins;
+  drop table vehicle_vins_old;
+  alter index vehicle_vins_next_pkey rename to vehicle_vins_pkey;
+  alter index vehicle_vins_next_pcv_idx rename to vehicle_vins_pcv_idx;
+
+  truncate table vehicle_vins_staging;
+  truncate table vehicles_staging;
+`;
+const OWNERSHIP_DESTRUCTIVE_REPLACE_SWITCH_SQL = `
+  create index ownership_relations_ico_current_relation_idx
+    on ownership_relations (ico, pcv)
+    where ico is not null and current is true and date_to is null and relation in ('Vlastnik', 'Provozovatel');
+  create index ownership_relations_ico_history_idx
+    on ownership_relations (ico, date_from desc, pcv)
+    where ico is not null and relation in ('Vlastnik', 'Provozovatel');
+  create index ownership_relations_pcv_history_idx
+    on ownership_relations (pcv, date_from desc)
+    where relation in ('Vlastnik', 'Provozovatel');
+  create index ownership_relations_missing_ico_name_current_relation_idx
+    on ownership_relations (lower(name), pcv)
+    where ico is null and name is not null and current is true and date_to is null and relation in ('Vlastnik', 'Provozovatel');
+  create index ownership_relations_missing_ico_name_history_idx
+    on ownership_relations (lower(name), date_from desc, pcv)
+    where ico is null and name is not null and relation in ('Vlastnik', 'Provozovatel');
+  analyze ownership_relations;
+  truncate table ownership_relations_staging;
+`;
+const OWNERSHIP_DESTRUCTIVE_REPLACE_LEAN_SWITCH_SQL = `
+  create index ownership_relations_pcv_history_idx
+    on ownership_relations (pcv, date_from desc)
+    where relation in ('Vlastnik', 'Provozovatel');
+  analyze ownership_relations;
+  truncate table ownership_relations_staging;
+`;
 
 const SOURCE_CONFIGS = {
   vehicles: {
@@ -506,6 +566,11 @@ const SOURCE_CONFIGS = {
   }
 };
 
+if (process.argv.includes("--self-check")) {
+  selfCheck();
+  process.exit(0);
+}
+
 main().catch(async (error) => {
   console.error("[open-data-import] failed");
   console.error(error && error.stack ? error.stack : String(error));
@@ -605,7 +670,12 @@ async function main() {
 	      if (source.name === "ownership") {
 	        companyPcvs = shouldImportAllVehicleRows() ? null : result.companyPcvs;
 	      }
-      await switchActiveSource(client, { ...source, count: result.count });
+      await switchActiveSource(client, {
+        ...source,
+        count: result.count,
+        replaceMain: result.replaceMain,
+        vinIndexOnly: result.vinIndexOnly
+      });
     }
   } catch (error) {
     await markFailed(client, resolvedSources, error).catch(() => {});
@@ -743,16 +813,27 @@ async function markFailed(client, sources, error) {
 async function importSourceToStaging(client, source, options = {}) {
   const { config } = source;
   const collectCompanyPcvs = Boolean(options.collectCompanyPcvs);
+  const filterOwnershipToActiveCompanyPcvs =
+    source.name === "ownership" && getOwnershipHistoryScope() === OWNERSHIP_HISTORY_SCOPE_ACTIVE_COMPANY_PCVS;
+  const replaceOwnershipMain = shouldDestructivelyReplaceOwnershipMain(source);
   if (source.name === "ownership") {
     console.log(`[open-data-import] ownership options ${JSON.stringify(getOwnershipImportOptions())}`);
+    if (replaceOwnershipMain) {
+      console.log("[open-data-import] ownership destructive replace enabled");
+    }
   }
   const ownershipPcvFilter =
-    source.name === "ownership" && collectCompanyPcvs && getOwnershipHistoryScope() === OWNERSHIP_HISTORY_SCOPE_ACTIVE_COMPANY_PCVS
+    filterOwnershipToActiveCompanyPcvs
       ? await collectActiveCompanyOwnershipPcvs(client, source)
       : null;
-  await client.query(`truncate table ${config.stagingTable}`);
+  const copyTable = replaceOwnershipMain ? config.mainTable : config.stagingTable;
+  if (replaceOwnershipMain) {
+    await prepareOwnershipDestructiveReplace(client);
+  } else {
+    await client.query(`truncate table ${config.stagingTable}`);
+  }
 
-  const copySql = `copy ${config.stagingTable} (${config.columns.join(", ")}) from stdin with (format text, delimiter E'\\t')`;
+  const copySql = `copy ${copyTable} (${config.columns.join(", ")}) from stdin with (format text, delimiter E'\\t')`;
   const copyStream = client.query(copyFrom(copySql));
   const copyDone = finished(copyStream);
   const companyPcvs = source.name === "ownership" && collectCompanyPcvs ? ownershipPcvFilter || new Set() : null;
@@ -812,13 +893,43 @@ async function importSourceToStaging(client, source, options = {}) {
   console.log(
     `[open-data-import] ${source.name} done processed=${processed} imported=${rowCount} file=${source.metadata.filename}`
   );
-  return { count: rowCount, companyPcvs };
+  return { count: rowCount, companyPcvs, replaceMain: replaceOwnershipMain };
+}
+
+async function prepareOwnershipDestructiveReplace(client) {
+  await client.query("drop table if exists ownership_relations_next");
+  await client.query("drop table if exists ownership_relations_old");
+  await client.query("truncate table ownership_relations_staging");
+  await client.query("truncate table ownership_parties restart identity");
+  await client.query("truncate table company_vehicle_facts");
+  await client.query("drop table if exists ownership_relations");
+  await client.query(`
+    create table ownership_relations (
+      id bigserial primary key,
+      party_id bigint,
+      pcv text not null,
+      ico text,
+      name text,
+      address text,
+      relation text,
+      subject_type text,
+      current boolean,
+      date_from date,
+      date_to date,
+      dataset_filename text,
+      dataset_date date,
+      imported_at timestamptz not null default now()
+    )
+  `);
 }
 
 async function collectActiveCompanyOwnershipPcvs(client, source) {
   const currentTablePcvs = await collectCurrentTableCompanyOwnershipPcvs(client, source);
-  if (currentTablePcvs) {
+  if (currentTablePcvs?.size > 0) {
     return currentTablePcvs;
+  }
+  if (currentTablePcvs) {
+    console.log("[open-data-import] ownership active table pcvs empty; falling back to csv scan");
   }
 
   const pcvs = new Set();
@@ -829,7 +940,7 @@ async function collectActiveCompanyOwnershipPcvs(client, source) {
     const row = normalizeOwnershipRecord(values, headerMap, source.metadata, {
       requireCurrent: true,
       requireIdentified: true,
-      requireIco: true
+      requireIco: false
     });
     if (!row || !isFleetOwnershipRelation(row.relation) || row.current !== true || row.date_to) {
       if (processed % 1000000 === 0) {
@@ -865,18 +976,32 @@ async function collectCurrentTableCompanyOwnershipPcvs(db) {
     select distinct pcv
     from ownership_relations
     where pcv is not null
-      and current is true
-      and date_to is null
-      and ico is not null
+      and (
+        ico is not null
+        or (
+          subject_type is not null
+          and (
+            lower(subject_type) = '2'
+            or lower(subject_type) like '%vnick%'
+            or lower(subject_type) like '%company%'
+            or lower(subject_type) like '%firma%'
+          )
+          and (nullif(btrim(name), '') is not null or nullif(btrim(address), '') is not null)
+        )
+      )
       and relation in ('Vlastnik', 'Provozovatel')
   `);
   const pcvs = new Set(result.rows.map((row) => String(row.pcv)).filter(Boolean));
-  console.log(`[open-data-import] ownership active-company pcvs=${pcvs.size} source=active-table`);
+  console.log(`[open-data-import] ownership legal-history pcvs=${pcvs.size} source=active-table`);
   return pcvs.size > 0 ? pcvs : null;
 }
 
 async function importVehiclesToStaging(client, source, companyPcvs) {
   const { config } = source;
+  if (shouldImportVehicleVinIndexOnly()) {
+    return await importVehicleVinsToStaging(client, source, companyPcvs);
+  }
+
   const pcvFilter = companyPcvs || new Set();
   const hasPcvFilter = pcvFilter.size > 0;
   await client.query("truncate table vehicles_staging");
@@ -929,10 +1054,61 @@ async function importVehiclesToStaging(client, source, companyPcvs) {
   return { count: summaryCount, companyPcvs: null };
 }
 
+async function importVehicleVinsToStaging(client, source, companyPcvs) {
+  const pcvFilter = companyPcvs || new Set();
+  const hasPcvFilter = pcvFilter.size > 0;
+  await client.query("truncate table vehicle_vins_staging");
+
+  const copy = client.query(
+    copyFrom("copy vehicle_vins_staging (vin, pcv, dataset_filename, dataset_date) from stdin with (format text, delimiter E'\\t')")
+  );
+  const done = finished(copy);
+  let processed = 0;
+  let vinCount = 0;
+
+  try {
+    await scanCsvSource(source, async ({ values, headerMap }) => {
+      processed += 1;
+      const row = normalizeVehicleVinRecord(values, headerMap, source.metadata);
+      if (!row || (hasPcvFilter && !pcvFilter.has(row.pcv))) {
+        if (processed % 1000000 === 0) {
+          console.log(`[open-data-import] vehicle-vins processed=${processed} vins=${vinCount}`);
+        }
+        return;
+      }
+
+      const line = ["vin", "pcv", "dataset_filename", "dataset_date"]
+        .map((column) => encodeCopyValue(row[column]))
+        .join("\t") + "\n";
+      if (!copy.write(line)) {
+        await once(copy, "drain");
+      }
+      vinCount += 1;
+
+      if (processed % 1000000 === 0) {
+        console.log(`[open-data-import] vehicle-vins processed=${processed} vins=${vinCount}`);
+      }
+    });
+    copy.end();
+    await done;
+  } catch (error) {
+    console.error(
+      `[open-data-import] vehicle-vins copy failed processed=${processed} vins=${vinCount} code=${error?.code || ""}`
+    );
+    copy.destroy(error);
+    throw error;
+  }
+
+  console.log(
+    `[open-data-import] vehicle-vins done processed=${processed} vins=${vinCount} file=${source.metadata.filename}`
+  );
+  return { count: vinCount, companyPcvs: null, vinIndexOnly: true };
+}
+
 async function switchActiveSource(client, source) {
   await client.query("begin");
   try {
-    await client.query(source.config.switchSql);
+    await client.query(resolveSwitchSql(source));
     await client.query(
       "update dataset_versions set active = false, updated_at = now() where source = $1",
       [source.name]
@@ -954,14 +1130,20 @@ async function switchActiveSource(client, source) {
 	    await client.query("commit");
 	    invalidateActiveDatasetVersionCache(source.name);
 	    console.log(`[open-data-import] ${source.name} activated count=${source.count} file=${source.metadata.filename}`);
-			    if (source.name === "ownership") {
+			    if (source.name === "ownership" && !source.replaceMain) {
 			      console.log("[open-data-import] refreshing company vehicle facts");
 			      await refreshCompanyVehicleFacts(client);
+			    } else if (source.name === "ownership") {
+			      // ponytail: keep the 5GB rebuild lean; rebuild facts later only if ICO fleet lookup latency matters.
+			      console.log("[open-data-import] skipped company vehicle facts refresh for destructive replace");
 			    }
-				    if (source.name === "vehicles") {
+				    if (source.name === "vehicles" && !source.vinIndexOnly) {
 				      await ensureOpenDataSchema();
 				      console.log("[open-data-import] refreshing vehicle plate summaries");
 			      await refreshVehiclePlateSummaries(client);
+			    } else if (source.name === "vehicles") {
+			      // ponytail: VIN ownership DB does not store vehicle summaries; API provides vehicle data.
+			      console.log("[open-data-import] skipped vehicle summary refresh for VIN-only import");
 			    }
 		    if (source.name === "inspections") {
 		      console.log("[open-data-import] refreshing vehicle inspection summaries");
@@ -971,6 +1153,20 @@ async function switchActiveSource(client, source) {
     await client.query("rollback");
     throw error;
   }
+}
+
+function resolveSwitchSql(source) {
+  if (source.name === "vehicles" && source.vinIndexOnly) {
+    return VEHICLE_VINS_ONLY_SWITCH_SQL;
+  }
+
+  if (source.name === "ownership" && source.replaceMain) {
+    return shouldUseLeanOwnershipIndexes()
+      ? OWNERSHIP_DESTRUCTIVE_REPLACE_LEAN_SWITCH_SQL
+      : OWNERSHIP_DESTRUCTIVE_REPLACE_SWITCH_SQL;
+  }
+
+  return source.config.switchSql;
 }
 
 async function scanCsvSource(source, onRow) {
@@ -1237,6 +1433,46 @@ function getNetworkTimeoutMs() {
   return Number.isFinite(timeout) && timeout > 0 ? timeout : 300000;
 }
 
+function selfCheck() {
+  const previousVinOnly = process.env.OPEN_DATA_IMPORT_VEHICLES_VIN_INDEX_ONLY;
+  const previousLeanOwnership = process.env.OPEN_DATA_IMPORT_LEAN_VIN_OWNERSHIP;
+  try {
+    process.env.OPEN_DATA_IMPORT_VEHICLES_VIN_INDEX_ONLY = "true";
+    process.env.OPEN_DATA_IMPORT_LEAN_VIN_OWNERSHIP = "true";
+    if (!shouldImportVehicleVinIndexOnly()) {
+      throw new Error("VIN-only vehicle import should be enabled by default.");
+    }
+    const vehicleSql = resolveSwitchSql({
+      name: "vehicles",
+      vinIndexOnly: true,
+      config: SOURCE_CONFIGS.vehicles
+    });
+    if (!vehicleSql.includes("vehicle_vins_next") || vehicleSql.includes("vehicles_next")) {
+      throw new Error("VIN-only vehicle switch must update vehicle_vins without building vehicles.");
+    }
+    const ownershipSql = resolveSwitchSql({
+      name: "ownership",
+      replaceMain: true,
+      config: SOURCE_CONFIGS.ownership
+    });
+    if (!ownershipSql.includes("ownership_relations_pcv_history_idx") || ownershipSql.includes("ownership_relations_ico_history_idx")) {
+      throw new Error("Lean ownership switch must keep only the PČV history index.");
+    }
+    console.log("[open-data-import] self-check ok");
+  } finally {
+    restoreEnvValue("OPEN_DATA_IMPORT_VEHICLES_VIN_INDEX_ONLY", previousVinOnly);
+    restoreEnvValue("OPEN_DATA_IMPORT_LEAN_VIN_OWNERSHIP", previousLeanOwnership);
+  }
+}
+
+function restoreEnvValue(name, value) {
+  if (value === undefined) {
+    delete process.env[name];
+  } else {
+    process.env[name] = value;
+  }
+}
+
 function normalizeVehicleRecord(values, headerMap, metadata) {
   const pcv = normalizeWhitespace(values[headerMap.PCV]);
   if (!pcv) {
@@ -1272,6 +1508,21 @@ function normalizeVehicleRecord(values, headerMap, metadata) {
 	    wheelbase_mm: normalizeVehicleMeasure(values[headerMap.ROZVORMM]),
 	    weight_kg: normalizeVehicleMeasure(values[headerMap.PROVOZNIHMOTNOST]),
 	    status: normalizeWhitespace(values[headerMap.STATUS]) || null,
+    dataset_filename: metadata.filename,
+    dataset_date: metadata.datasetDate
+  };
+}
+
+function normalizeVehicleVinRecord(values, headerMap, metadata) {
+  const pcv = normalizeWhitespace(values[headerMap.PCV]);
+  const vin = normalizeVin(values[headerMap.VIN]);
+  if (!pcv || !vin) {
+    return null;
+  }
+
+  return {
+    vin,
+    pcv,
     dataset_filename: metadata.filename,
     dataset_date: metadata.datasetDate
   };
@@ -1332,7 +1583,7 @@ function getOwnershipImportOptions() {
 function getOwnershipHistoryScope() {
   return normalizeForMatch(
     process.env.OPEN_DATA_IMPORT_OWNERSHIP_HISTORY_SCOPE ||
-      (isFullLocalImportProfile() ? "all" : OWNERSHIP_HISTORY_SCOPE_ACTIVE_COMPANY_PCVS)
+      (isFullLocalImportProfile() ? "all" : OWNERSHIP_HISTORY_SCOPE_LEGAL_HISTORY)
   );
 }
 
@@ -1343,6 +1594,19 @@ function shouldImportAllVehicleRows() {
       process.env.OPEN_DATA_IMPORT_VEHICLES_ALL_VINS ??
         (isFullLocalImportProfile() ? "true" : "false")
     ).toLowerCase() === "true";
+}
+
+function shouldImportVehicleVinIndexOnly() {
+  return String(process.env.OPEN_DATA_IMPORT_VEHICLES_VIN_INDEX_ONLY || "true").toLowerCase() !== "false";
+}
+
+function shouldDestructivelyReplaceOwnershipMain(source) {
+  return source.name === "ownership" &&
+    String(process.env.OPEN_DATA_IMPORT_OWNERSHIP_DESTRUCTIVE_REPLACE || "false").toLowerCase() === "true";
+}
+
+function shouldUseLeanOwnershipIndexes() {
+  return String(process.env.OPEN_DATA_IMPORT_LEAN_VIN_OWNERSHIP || "true").toLowerCase() !== "false";
 }
 
 function isFleetOwnershipRelation(value) {
@@ -1364,7 +1628,7 @@ function isDisplayableOwnershipSubject({ ico, subjectType, name, address }) {
 
 function isLegalEntitySubjectType(value) {
   const normalized = normalizeForMatch(value);
-  return normalized.includes("pravnick") || normalized.includes("company") || normalized.includes("firma");
+  return normalized === "2" || normalized.includes("pravnick") || normalized.includes("company") || normalized.includes("firma");
 }
 
 function looksLikeCompanyName(value) {

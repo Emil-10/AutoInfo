@@ -1,12 +1,12 @@
 # Info.exleasing.cz
 
-Jednostrankova aplikace pro vyhledani vozidla podle `SPZ`/`VIN` a firemnich vozidel podle `ICO`.
+Jednostrankova aplikace pro vyhledani vozidla podle `SPZ` nebo `VIN`.
 
 ## Co je hotove
 
 - moderni responzivni UI s jednim vstupnim polem
 - vlastni Node server bez externich zavislosti
-- `/api/lookup` endpoint pro napojeni na produkcni zdroj vcetne automatickeho rozpoznani `ICO`
+- `/api/lookup` endpoint pro napojeni na produkcni zdroj podle `SPZ` nebo `VIN`
 - demo dataset pro rychle predvedeni
 - obohaceni firemnich subjektu z ARES podle `ICO`
 - firemni subjekty z registru maji prioritu, dalsi verejny prehled se pouzije jen jako fallback
@@ -99,7 +99,15 @@ Import načte poslední CSV z `download.dataovozidlech.cz`, uloží data do stag
 
 Oficiální dataset vlastníků/provozovatelů často obsahuje právnickou osobu jen ve sloupci `Název`, ale bez `IČO`. IČO lookup proto dělá dvě indexované cesty: přímé `ownership_relations.ico = IČO` a fallback `IČO -> ARES obchodní jméno -> lower(ownership_relations.name)`, pouze pro řádky s prázdným `ico`. Pro druhou cestu slouží partial indexy `ownership_relations_missing_ico_name_*`.
 
-Výchozí profil je úsporný pro Railway Hobby: `OPEN_DATA_IMPORT_SOURCES=ownership,vehicles`, vlastnické vazby se zužují na aktuální neanonymizované právnické osoby a vozidla se importují jen pro nalezené `PČV`. Lokální plná databáze se spouští přes:
+Výchozí profil je úsporný pro Railway Hobby: `OPEN_DATA_IMPORT_SOURCES=ownership,vehicles`, ale `vehicles` importuje jen malý `vehicle_vins` index (`OPEN_DATA_IMPORT_VEHICLES_VIN_INDEX_ONLY=true`). Technická data vozidla se berou přes veřejné VIN API, takže v DB není potřeba držet plný 16GB výpis vozidel ani STK tabulky. Vlastnické vazby berou celou historii zobrazitelných právnických osob (`OPEN_DATA_IMPORT_OWNERSHIP_HISTORY_SCOPE=legal-history`) a nevyžadují `IČO`, protože část právnických osob je ve zdroji jen podle názvu. Lean rebuild používá `OPEN_DATA_IMPORT_OWNERSHIP_DESTRUCTIVE_REPLACE=true`: zahodí aktuální `ownership_relations`, nahradí ji přímo a přeskočí velké fact tabulky.
+
+Kontrola lean importních větví bez DB:
+
+```bash
+npm run test:lean-import
+```
+
+Lokální plná databáze se spouští přes:
 
 ```bash
 npm run db:migrate
@@ -170,24 +178,18 @@ Podporovane vstupy jsou CSV, JSON a JSONL. Rozpoznane sloupce jsou napr. `pcv`, 
 npm run db:import-plates -- --file ./plates.csv --source provider-name --dry-run
 ```
 
-### E2E kontrola SPZ a ICO vypisu
+### E2E kontrola SPZ a fotky
 
-Zakladni E2E nejdriv overi, ze je dostupna lokální Postgres DB, potom overi primy `SPZ -> VIN/PČV` lookup a nakonec konkretni vozidlo ve fleet vypisu podle `ICO` vcetne stejne SPZ a STK:
+Zakladni E2E overi rychly `SPZ -> VIN` lookup, sdilenou stranku `/spz/...` a upload fotky SPZ:
 
 ```bash
-npm run test:e2e:ico
+npm run test:e2e:spz-photo
 ```
 
-Stejny test je dostupny i pod explicitnim nazvem:
+Vychozi cil je produkce `https://spz.up.railway.app`; lokalni server lze otestovat pres:
 
 ```bash
-npm run test:e2e:spz-ico
-```
-
-Pro audit cele viditelne stranky lze zapnout strict coverage rezim. Ten zamerne spadne, pokud libovolne viditelne vozidlo nema SPZ nebo datum STK:
-
-```bash
-E2E_REQUIRE_ALL_VISIBLE_PLATES=1 E2E_REQUIRE_ALL_VISIBLE_STK=1 npm run test:e2e:ico
+E2E_BASE_URL=http://127.0.0.1:3000 npm run test:e2e:spz-photo
 ```
 
 Na Windows PowerShellu:

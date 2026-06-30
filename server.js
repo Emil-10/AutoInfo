@@ -22,8 +22,6 @@ const LOOKUP_AUDIT_EVENTS = new Map([
   ["/api/lookup/inspections", "inspection_lookup"],
   ["/api/lookup/ownership", "ownership_lookup"],
   ["/api/lookup/vignette", "vignette_lookup"],
-  ["/api/company-fleet", "company_fleet_lookup"],
-  ["/api/company-fleet/history", "company_fleet_history_lookup"],
   ["/api/resolve-plate", "plate_resolution_lookup"],
   ["/api/scan-plate", "plate_scan"],
   ["/api/vehicle-history", "vehicle_history_lookup"]
@@ -148,10 +146,6 @@ function normalizeLookupType(value) {
     return "vin";
   }
 
-  if (normalized === "ico" || normalized === "ic") {
-    return "ico";
-  }
-
   return "";
 }
 
@@ -161,22 +155,24 @@ async function handleLookup(req, requestUrl, res) {
 
   if (!query) {
     sendJson(res, 400, {
-      message: "Zadejte SPZ, VIN nebo IČO.",
-      hints: ["Například 1AB2345, TMBJJ7NE8L0123456 nebo 27074358."]
+      message: "Zadejte SPZ nebo VIN.",
+      hints: ["Například 1AB2345 nebo TMBJJ7NE8L0123456."]
     });
     return;
   }
 
   try {
-    const { lookupVehicle, lookupVehiclesByIco, parseLookupQuery, describeLookupFailure } = getVehicleService();
+    const { lookupVehicle, parseLookupQuery, describeLookupFailure } = getVehicleService();
     const parsedQuery = typeof parseLookupQuery === "function" ? parseLookupQuery(query, requestedType) : null;
-    if (parsedQuery?.type === "ico") {
-      const result = await lookupVehiclesByIco(query);
-      sendJson(res, 200, result);
+    const automaticParsedQuery = typeof parseLookupQuery === "function" ? parseLookupQuery(query) : null;
+    if (parsedQuery?.type === "ico" || automaticParsedQuery?.type === "ico") {
+      sendJson(res, 410, {
+        message: "Hledání podle IČO je vypnuté. Zadejte SPZ nebo VIN."
+      });
       return;
     }
 
-    const { record, diagnostics } = await lookupVehicle(query, { includeOwnership: true, type: requestedType });
+    const { record, diagnostics } = await lookupVehicle(query, { type: requestedType });
 
     if (!record) {
       const payload = describeLookupFailure(query, diagnostics, requestedType);
@@ -511,49 +507,15 @@ function getProvidedAdminToken(req, requestUrl) {
 }
 
 async function handleCompanyFleetLookup(req, requestUrl, res) {
-  const ico = (requestUrl.searchParams.get("ico") || "").trim();
-
-  if (!ico) {
-    sendJson(res, 400, {
-      message: "Zadejte IČO právnické osoby.",
-      hints: ["Například 27074358."]
-    });
-    return;
-  }
-
-  try {
-    const { lookupVehiclesByIco } = getVehicleService();
-    const result = await lookupVehiclesByIco(ico);
-    sendJson(res, 200, result);
-  } catch (error) {
-    sendJson(res, 502, {
-      message: "Nepodařilo se načíst seznam vozidel pro zadané IČO.",
-      detail: error.message
-    });
-  }
+  sendJson(res, 410, {
+    message: "Hledání flotily podle IČO je vypnuté. Zadejte SPZ nebo VIN."
+  });
 }
 
 async function handleCompanyFleetHistoryLookup(req, requestUrl, res) {
-  const ico = (requestUrl.searchParams.get("ico") || "").trim();
-  const pcv = (requestUrl.searchParams.get("pcv") || "").trim();
-
-  if (!ico || !pcv) {
-    sendJson(res, 400, {
-      message: "Zadejte IČO a PČV pro načtení historie vztahu."
-    });
-    return;
-  }
-
-  try {
-    const { lookupCompanyVehicleHistory } = getVehicleService();
-    const result = await lookupCompanyVehicleHistory(ico, pcv);
-    sendJson(res, 200, result);
-  } catch (error) {
-    sendJson(res, 502, {
-      message: "Nepodařilo se načíst historii vztahu firmy k vozidlu.",
-      detail: error.message
-    });
-  }
+  sendJson(res, 410, {
+    message: "Historie flotily podle IČO je vypnutá."
+  });
 }
 
 async function handlePlateResolutionLookup(req, requestUrl, res) {
@@ -677,7 +639,7 @@ function hasBlockingLookupError(diagnostics) {
 }
 
 function sanitizeLookupLogSource(source) {
-  if (source === "pvzp-browser" || source === "uniqa-browser") {
+  if (source === "pvzp-browser" || source === "pvzp-direct" || source === "uniqa-browser") {
     return "external-browser-source";
   }
   return source;

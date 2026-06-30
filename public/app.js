@@ -23,7 +23,7 @@ async function handleSubmit(event) {
   const query = input.value.trim();
 
   if (!query) {
-    setStatus("Zadej SPZ, VIN nebo IČO.", "warning");
+    setStatus("Zadej SPZ nebo VIN.", "warning");
     input.focus();
     return;
   }
@@ -60,10 +60,6 @@ function detectInputType(value) {
   const compact = String(value || "")
     .toUpperCase()
     .replace(/[^A-Z0-9]/g, "");
-
-  if (/^\d{8}$/.test(compact) && isValidIco(compact)) {
-    return "ico";
-  }
 
   if (/^[A-HJ-NPR-Z0-9]{17}$/.test(compact)) {
     return "vin";
@@ -335,7 +331,7 @@ function renderQueryLabel(query) {
     return "";
   }
 
-  const type = query.type === "vin" ? "VIN" : query.type === "ico" ? "IČO" : "SPZ";
+  const type = query.type === "vin" ? "VIN" : "SPZ";
   return `${type}: ${query.raw || query.normalized || ""}`;
 }
 

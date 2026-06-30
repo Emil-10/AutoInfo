@@ -12,3 +12,4 @@ result-preview.png
 local-alpr*.log
 __pycache__/
 *.pyc
+eng.traineddata

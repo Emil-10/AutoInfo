@@ -1159,7 +1159,7 @@ function OwnershipPanel({ ownership, parties, lookup, query }) {
   const legalParties = sourceParties.filter(isLegalEntityParty);
   const { currentParties, historicalParties } = splitOwnershipParties(legalParties);
   const timelineParties = [...currentParties, ...historicalParties];
-  const [showHistory, setShowHistory] = useState(false);
+  const [showHistory, setShowHistory] = useState(currentParties.length === 0 && historicalParties.length > 0);
   const legalOwnerCount = countLegalRole(legalParties, "vlast");
   const legalOperatorCount = countLegalRole(legalParties, "provoz");
   const uniqueLegalCount = countUniqueLegalEntities(legalParties);
@@ -1167,6 +1167,12 @@ function OwnershipPanel({ ownership, parties, lookup, query }) {
   const sourceOperatorCount = ownership?.operatorCount ?? null;
   const lookupMessage = buildOwnershipPanelMessage({ lookup, parties: legalParties, sourceOwnerCount, sourceOperatorCount, query });
   const statusText = formatOwnershipStatus(lookup, uniqueLegalCount || legalParties.length);
+
+  useEffect(() => {
+    if (currentParties.length === 0 && historicalParties.length > 0) {
+      setShowHistory(true);
+    }
+  }, [currentParties.length, historicalParties.length]);
 
   return (
     <section className="overflow-hidden rounded-[2rem] border border-white/10 bg-card/78">
@@ -3159,7 +3165,7 @@ function isLegalEntityParty(party) {
   const type = normalizeForMatch(party.type || party.subjectType);
   const name = String(party.name || "").trim();
 
-  return Boolean(party.ico || ((type.includes("pravnick") || type === "company") && isDisplayablePartyText(name)));
+  return Boolean(party.ico || ((type === "2" || type.includes("pravnick") || type === "company") && isDisplayablePartyText(name)));
 }
 
 function isCurrentOwnershipParty(party) {

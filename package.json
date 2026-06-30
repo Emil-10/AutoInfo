@@ -26,6 +26,8 @@
     "postinstall": "node node_modules/playwright-core/cli.js install chromium",
     "start": "node scripts/start.js",
     "test:error-copy": "node scripts/check-public-error-copy.js",
+    "test:lean-import": "node scripts/import-open-data-postgres.js --self-check",
+    "test:e2e:spz-photo": "node scripts/e2e-spz-photo.js",
     "test:e2e:ico": "node scripts/e2e-ico-fleet.js",
     "test:e2e:spz-ico": "node scripts/e2e-ico-fleet.js"
   },
